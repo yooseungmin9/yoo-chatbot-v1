@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="UTF-8" />
+  <title id="appTitle">AI 경제 상담봇</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" th:href="@{/css/style.css}" />
+  <style>
+    .chatbot-container { position: relative; }
+    .top-controls {
+      position: absolute; top: 8px; right: 8px;
+      display: flex; flex-direction: column; gap: 6px; align-items: flex-end;
+    }
+    .top-controls select { padding: 4px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main class="main">
+    <div class="container">
+      <h2 id="pageHeading" class="page-title" style="color:#000000">경제 질문 챗봇</h2>
+
+      <div class="global-controls">
+        <!-- ▼ 언어 전환시 라벨/버튼/플레이스홀더/환영멘트도 바뀌게 JS에서 처리 -->
+        <label id="labelLang" for="langSelect" class="sr-only">언어</label>
+        <select id="langSelect" aria-label="음성 인식 언어">
+          <option value="ko-KR">한국어</option>
+          <option value="en-US">English</option>
+        </select>
+
+        <!-- ▼ 초기화 버튼(“전체 화면 초기화”) -->
+        <button id="resetBtn" type="button" class="btn btn--secondary">대화 초기화</button>
+      </div>
+
+      <div class="chatbot-container">
+        <!-- ▼ JS가 환영멘트/상태/대화내용을 렌더하도록 비워둠 -->
+        <div id="chat" class="chat-messages"></div>
+
+        <form id="chatForm" class="chat-form flex-row">
+          <textarea id="messageInput" rows="1" placeholder="질문을 말하거나 입력하세요..." class="chat-input-auto"></textarea>
+          <div class="btn-group">
+            <button id="sttStartBtn" type="button" class="btn btn--secondary">🎤️</button>
+            <button id="sttStopBtn"  type="button" class="btn btn--secondary" disabled>⏹</button>
+            <button id="sendBtn"  type="submit" class="btn btn--primary">전송</button>
+            <button id="ttsBtn"   type="button" class="btn btn--secondary">🔈 답변 듣기</button>
+          </div>
+        </form>
+
+        <audio id="ttsAudio" controls class="hidden"></audio>
+      </div>
+
+      <!-- 예시질문 -->
+      <div class="faq-row" aria-label="예시 질문">
+        <button type="button" class="btn btn--ghost faq-item" data-question="최신 경제 뉴스 Top5 알려줘">최신 경제 뉴스 Top5 알려줘</button>
+        <button type="button" class="btn btn--ghost faq-item" data-question="이 웹서비스의 기능을 알려줘">이 웹서비스의 기능을 알려줘</button>
+        <button type="button" class="btn btn--ghost faq-item" data-question="금리가 무엇이며, 한국은행 기준금리는 몇 %인가요?">금리 용어설명과 한국 기준금리 알려줘</button>
+        <button type="button" class="btn btn--ghost faq-item" data-question="원자재값이 경제에 미치는 영향 알려줘">원자재값이 경제에 미치는 영향 알려줘</button>
+        <button type="button" class="btn btn--ghost faq-item" data-question="현재 주요 지수와 환율이 어떻게 되나요??">현재 주요 지수와 환율이 어떻게 되나요??</button>
+      </div>
+    </div>
+  </main>
+  <script src="/js/chat.js"></script>
+</body>
+</html>
