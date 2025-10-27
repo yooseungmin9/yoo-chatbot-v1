@@ -45,11 +45,12 @@ AI가 뉴스 요약, 감성 분석, 키워드 추출을 자동화하여
 ```python
 # chatbot.py
 @app.post("/chat")
-    # 1. 사용자 질의 수신
-    # 2. Function Calling으로 OpenAI 호출
-    # 2. MongoDB 최신 기사 또는 RAG 문서 검색
-    # 3. OpenAPI 호출을 통해 실시간 정보 응답 (ECOS, FRED, yFinance)
-    # 4. STT/TTS 후처리 및 응답한 JSON을 대화 형태로 송신
+    # 1. 요청 수신 및 전처리
+    # 2. Function Calling으로 OpenAI 1차 호출
+    # 3. MongoDB 최신 기사 또는 RAG 문서 검색
+    # 4. OpenAPI 호출을 통해 실시간 정보 응답 (ECOS, FRED, yFinance)
+    # 5. OpenAI 2차 호출 (함수 결과 통합)
+    # 6. STT/TTS 후처리 및 응답한 JSON을 대화 형태로 송신(응답 반환 및 세션 저장)
 ```
 
 ### 🧾 Function 목록
