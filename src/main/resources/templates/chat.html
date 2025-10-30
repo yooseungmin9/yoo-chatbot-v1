@@ -4,60 +4,364 @@
   <meta charset="UTF-8" />
   <title id="appTitle">AI 경제 상담봇</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" th:href="@{/css/style.css}" />
   <style>
-    .chatbot-container { position: relative; }
-    .top-controls {
-      position: absolute; top: 8px; right: 8px;
-      display: flex; flex-direction: column; gap: 6px; align-items: flex-end;
+    /* ===== Global Styles ===== */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
     }
-    .top-controls select { padding: 4px; font-size: 14px; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #667eea;
+      color: #333;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    /* ===== Main Container ===== */
+    .main {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px 0;
+    }
+
+    .container {
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 15px 50px rgba(0, 0, 0, 0.15);
+      padding: 40px;
+      max-width: 700px;
+      width: 100%;
+    }
+
+    .page-title {
+      text-align: center;
+      font-size: 2em;
+      margin-bottom: 35px;
+      font-weight: 700;
+      color: #1a1a1a;
+    }
+
+    /* ===== Controls ===== */
+    .global-controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 30px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .global-controls select {
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid #e0e0e0;
+      font-size: 14px;
+      cursor: pointer;
+      background: white;
+    }
+
+    .global-controls button {
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      background: #e8e8e8;
+      color: #667eea;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+
+    .global-controls button:hover {
+      background: #d8d8d8;
+    }
+
+    /* ===== Chatbot Container ===== */
+    .chatbot-container {
+      position: relative;
+      background: #f8f9fb;
+      border: 1px solid #e8e8e8;
+      border-radius: 12px;
+      height: 400px;
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 25px;
+    }
+
+    .chat-messages {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      background: white;
+      border-radius: 12px 12px 0 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .chat-messages::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .chat-messages::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .chat-messages::-webkit-scrollbar-thumb {
+      background: #ccc;
+      border-radius: 3px;
+    }
+
+    /* ===== Messages ===== */
+    .message {
+      display: flex;
+      margin-bottom: 8px;
+    }
+
+    .bot-message {
+      justify-content: flex-start;
+    }
+
+    .bot-message .message-content {
+      background: #e8eeff;
+      color: #667eea;
+      padding: 12px 16px;
+      border-radius: 12px 12px 12px 4px;
+      max-width: 75%;
+      word-wrap: break-word;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .user-message {
+      justify-content: flex-end;
+    }
+
+    .user-message .message-content {
+      background: #667eea;
+      color: white;
+      padding: 12px 16px;
+      border-radius: 12px 12px 4px 12px;
+      max-width: 75%;
+      word-wrap: break-word;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ===== Chat Form ===== */
+    .chat-form {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      padding: 15px;
+      background: #f8f9fb;
+      border-radius: 0 0 12px 12px;
+      flex-wrap: wrap;
+    }
+
+    .chat-input-auto {
+      flex: 1;
+      min-width: 150px;
+      resize: none;
+      min-height: 44px;
+      max-height: 120px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid #ddd;
+      font-size: 14px;
+      font-family: inherit;
+    }
+
+    .chat-input-auto:focus {
+      outline: none;
+      border-color: #667eea;
+      background: white;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    /* ===== Buttons ===== */
+    .btn {
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      white-space: nowrap;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn--primary {
+      background: #667eea;
+      color: white;
+    }
+
+    .btn--primary:hover:not(:disabled) {
+      background: #5568d3;
+      transform: translateY(-1px);
+    }
+
+    .btn--secondary {
+      background: white;
+      color: #667eea;
+      border: 1.5px solid #667eea;
+    }
+
+    .btn--secondary:hover:not(:disabled) {
+      background: #f0f3ff;
+      transform: translateY(-1px);
+    }
+
+    .btn--ghost {
+      background: white;
+      color: #667eea;
+      border: 1px solid #ddd;
+      padding: 12px 16px;
+    }
+
+    .btn--ghost:hover:not(:disabled) {
+      background: #f0f3ff;
+      border-color: #667eea;
+    }
+
+    /* ===== FAQ Section ===== */
+    .faq-row {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .faq-item {
+      width: 100%;
+      padding: 14px 16px;
+      text-align: left;
+      word-wrap: break-word;
+      font-size: 14px;
+    }
+
+    .faq-item:hover {
+      background: #f0f3ff;
+      border-color: #667eea;
+    }
+
+    /* ===== Audio Player ===== */
+    .hidden {
+      display: none;
+    }
+
+    audio {
+      width: 100%;
+      margin-top: 15px;
+    }
+
+    /* ===== Utility Classes ===== */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+
+    .flex-row {
+      display: flex;
+      flex-direction: row;
+    }
+
+    /* ===== Responsive Design ===== */
+    @media (max-width: 768px) {
+      .container {
+        padding: 25px;
+      }
+
+      .page-title {
+        font-size: 1.5em;
+        margin-bottom: 25px;
+      }
+
+      .chatbot-container {
+        height: 350px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .container {
+        padding: 20px;
+      }
+
+      .page-title {
+        font-size: 1.3em;
+      }
+
+      .chatbot-container {
+        height: 300px;
+      }
+
+      .btn-group {
+        width: 100%;
+        justify-content: space-between;
+      }
+    }
   </style>
 </head>
 <body>
-  <main class="main">
-    <div class="container">
-      <h2 id="pageHeading" class="page-title" style="color:#000000">경제 질문 챗봇</h2>
+<main class="main">
+  <div class="container">
+    <h2 id="pageHeading" class="page-title">경제 질문 챗봇</h2>
 
-      <div class="global-controls">
-        <!-- ▼ 언어 전환시 라벨/버튼/플레이스홀더/환영멘트도 바뀌게 JS에서 처리 -->
-        <label id="labelLang" for="langSelect" class="sr-only">언어</label>
-        <select id="langSelect" aria-label="음성 인식 언어">
-          <option value="ko-KR">한국어</option>
-          <option value="en-US">English</option>
-        </select>
-
-        <!-- ▼ 초기화 버튼(“전체 화면 초기화”) -->
-        <button id="resetBtn" type="button" class="btn btn--secondary">대화 초기화</button>
-      </div>
-
-      <div class="chatbot-container">
-        <!-- ▼ JS가 환영멘트/상태/대화내용을 렌더하도록 비워둠 -->
-        <div id="chat" class="chat-messages"></div>
-
-        <form id="chatForm" class="chat-form flex-row">
-          <textarea id="messageInput" rows="1" placeholder="질문을 말하거나 입력하세요..." class="chat-input-auto"></textarea>
-          <div class="btn-group">
-            <button id="sttStartBtn" type="button" class="btn btn--secondary">🎤️</button>
-            <button id="sttStopBtn"  type="button" class="btn btn--secondary" disabled>⏹</button>
-            <button id="sendBtn"  type="submit" class="btn btn--primary">전송</button>
-            <button id="ttsBtn"   type="button" class="btn btn--secondary">🔈 답변 듣기</button>
-          </div>
-        </form>
-
-        <audio id="ttsAudio" controls class="hidden"></audio>
-      </div>
-
-      <!-- 예시질문 -->
-      <div class="faq-row" aria-label="예시 질문">
-        <button type="button" class="btn btn--ghost faq-item" data-question="최신 경제 뉴스 Top5 알려줘">최신 경제 뉴스 Top5 알려줘</button>
-        <button type="button" class="btn btn--ghost faq-item" data-question="이 웹서비스의 기능을 알려줘">이 웹서비스의 기능을 알려줘</button>
-        <button type="button" class="btn btn--ghost faq-item" data-question="금리가 무엇이며, 한국은행 기준금리는 몇 %인가요?">금리 용어설명과 한국 기준금리 알려줘</button>
-        <button type="button" class="btn btn--ghost faq-item" data-question="원자재값이 경제에 미치는 영향 알려줘">원자재값이 경제에 미치는 영향 알려줘</button>
-        <button type="button" class="btn btn--ghost faq-item" data-question="현재 주요 지수와 환율이 어떻게 되나요??">현재 주요 지수와 환율이 어떻게 되나요??</button>
-      </div>
+    <div class="global-controls">
+      <label id="labelLang" for="langSelect" class="sr-only">언어</label>
+      <select id="langSelect" aria-label="음성 인식 언어">
+        <option value="ko-KR">한국어</option>
+        <option value="en-US">English</option>
+      </select>
+      <button id="resetBtn" type="button" class="btn">대화 초기화</button>
     </div>
-  </main>
-  <script src="/js/chat.js"></script>
+
+    <div class="chatbot-container">
+      <div id="chat" class="chat-messages"></div>
+
+      <form id="chatForm" class="chat-form flex-row">
+        <textarea id="messageInput" rows="1" placeholder="질문을 말하거나 입력하세요..." class="chat-input-auto"></textarea>
+        <div class="btn-group">
+          <button id="sttStartBtn" type="button" class="btn btn--secondary">🎤</button>
+          <button id="sttStopBtn" type="button" class="btn btn--secondary" disabled>⏹</button>
+          <button id="sendBtn" type="submit" class="btn btn--primary">전송</button>
+          <button id="ttsBtn" type="button" class="btn btn--secondary">🔈</button>
+        </div>
+      </form>
+
+      <audio id="ttsAudio" controls class="hidden"></audio>
+    </div>
+
+    <div class="faq-row" aria-label="예시 질문">
+      <button type="button" class="btn btn--ghost faq-item" data-question="최신 경제 뉴스 Top5 알려줘">최신 경제 뉴스 Top5 알려줘</button>
+      <button type="button" class="btn btn--ghost faq-item" data-question="이 웹서비스의 기능을 알려줘">이 웹서비스의 기능을 알려줘</button>
+      <button type="button" class="btn btn--ghost faq-item" data-question="금리가 무엇이며, 한국은행 기준금리는 몇 %인가요?">금리 용어설명과 한국 기준금리 알려줘</button>
+      <button type="button" class="btn btn--ghost faq-item" data-question="원자재값이 경제에 미치는 영향 알려줘">원자재값이 경제에 미치는 영향 알려줘</button>
+      <button type="button" class="btn btn--ghost faq-item" data-question="현재 주요 지수와 환율이 어떻게 되나요??">현재 주요 지수와 환율이 어떻게 되나요??</button>
+    </div>
+  </div>
+</main>
+<script src="/js/chat.js"></script>
 </body>
 </html>
