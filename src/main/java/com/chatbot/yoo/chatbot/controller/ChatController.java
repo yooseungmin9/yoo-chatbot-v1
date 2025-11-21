@@ -37,7 +37,7 @@ public class ChatController {
 
     // 챗봇 페이지
     @GetMapping("/chat")
-    public String chatPage() { return "/chat"; }
+    public String chatPage() { return "chat"; }
 
     // === Chat: POST /api/chat → FastAPI /chat ===
     @PostMapping(value = "/api/chat", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)

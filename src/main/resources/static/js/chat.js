@@ -62,7 +62,51 @@ const sttStopBtn  = document.getElementById("sttStopBtn");
 const ttsBtn      = document.getElementById("ttsBtn");
 const ttsAudio    = document.getElementById("ttsAudio");
 
+// 다크모드 관련 DOM
+const themeToggleBtn = document.getElementById("themeToggleBtn");
+const themeIcon = themeToggleBtn?.querySelector(".theme-icon");
+
 let LANG = localStorage.getItem("chat_lang") || (langSelect?.value || "ko-KR");
+
+// ========== 1-1) 다크모드 초기화 ==========
+function initTheme() {
+  const savedTheme = localStorage.getItem("chat_theme") || "light";
+  applyTheme(savedTheme, false); // 애니메이션 없이 즉시 적용
+}
+
+function applyTheme(theme, animate = true) {
+  const htmlEl = document.documentElement;
+  
+  // 애니메이션 제어
+  if (!animate) {
+    htmlEl.classList.add("no-transition");
+  }
+  
+  if (theme === "dark") {
+    htmlEl.setAttribute("data-theme", "dark");
+    if (themeIcon) themeIcon.textContent = "☀️";
+  } else {
+    htmlEl.removeAttribute("data-theme");
+    if (themeIcon) themeIcon.textContent = "🌙";
+  }
+  
+  localStorage.setItem("chat_theme", theme);
+  
+  // 애니메이션 복원
+  if (!animate) {
+    setTimeout(() => htmlEl.classList.remove("no-transition"), 50);
+  }
+}
+
+function toggleTheme() {
+  const htmlEl = document.documentElement;
+  const currentTheme = htmlEl.getAttribute("data-theme");
+  const newTheme = currentTheme === "dark" ? "light" : "dark";
+  applyTheme(newTheme, true);
+}
+
+// 다크모드 버튼 이벤트
+themeToggleBtn?.addEventListener("click", toggleTheme);
 
 // ========== 2) 도우미 ==========
 const escapeHtml = (s)=>String(s||"").replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
@@ -85,10 +129,7 @@ function bubbleStatus(text){
   scrollToBottom();
 }
 function bubbleTyping() {
-  // 1) 고유 ID 생성 (crypto.randomUUID() 지원 시 사용)
   const id = "typing-" + (crypto?.randomUUID?.() || Math.random().toString(36).slice(2));
-
-  // 2) 채팅 영역에 '입력중' 말풍선 추가
   chatEl.insertAdjacentHTML(
     "beforeend",
     `<div id="${id}" class="message bot-message">
@@ -97,8 +138,7 @@ function bubbleTyping() {
       </div>
     </div>`
   );
-
-  return id; // 나중에 제거할 때 ID로 접근 가능
+  return id;
 }
 function removeEl(id){ const el=document.getElementById(id); if(el) el.remove(); }
 
@@ -169,6 +209,7 @@ function bindFAQ(){
 }
 
 // ========== 4) 초기화 ==========
+initTheme(); // 다크모드 먼저 초기화
 setLang(LANG);
 renderWelcome();
 bindFAQ();
@@ -208,11 +249,11 @@ resetBtn?.addEventListener("click", async ()=>{
   }
 });
 
-// ========== 6) STT: 마이크 실시간 받아적기(입력창에만 채움, 전송은 수동) ==========
+// ========== 6) STT: 마이크 실시간 받아적기 ==========
 let recognition = null;
 let recogRunning = false;
-let baseBeforeRec = "";         // 시작 시 입력창에 있던 텍스트
-let finalSoFar = "";            // 엔진이 확정한 문장 누적
+let baseBeforeRec = "";
+let finalSoFar = "";
 
 function isSpeechAPIAvailable(){
   return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -221,9 +262,9 @@ function isSpeechAPIAvailable(){
 function makeRecognition(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const r = new SR();
-  r.lang = LANG;                // ko-KR / en-US 등
-  r.interimResults = true;      // 중간(회색) 결과도 계속 옴
-  r.continuous = true;          // 멈출 때까지 계속 듣기
+  r.lang = LANG;
+  r.interimResults = true;
+  r.continuous = true;
   return r;
 }
 
@@ -243,9 +284,8 @@ async function startSTT(){
     return;
   }
 
-  // 준비
   recognition = makeRecognition();
-  baseBeforeRec = inputEl.value;  // 시작 전에 입력창 내용 보존
+  baseBeforeRec = inputEl.value;
   finalSoFar = "";
 
   recognition.onstart = ()=>{
@@ -256,7 +296,6 @@ async function startSTT(){
   };
 
   recognition.onresult = (e)=>{
-    // resultIndex부터 최신까지 스캔하여 확정/임시 분리
     let interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const res = e.results[i];
@@ -266,10 +305,8 @@ async function startSTT(){
         interim += res[0].transcript;
       }
     }
-    // 입력창에 실시간 반영: (기존내용) + (확정누적) + (임시)
     const composed = (baseBeforeRec ? baseBeforeRec + " " : "") + (finalSoFar + interim).trim();
     inputEl.value = composed;
-    // 커서를 맨 뒤로
     try { inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length); } catch {}
   };
 
@@ -278,7 +315,6 @@ async function startSTT(){
   };
 
   recognition.onend = ()=>{
-    // 끝났을 때(사용자가 stop 누르거나 침묵 등)
     recogRunning = false;
     sttStartBtn.disabled = false;
     sttStopBtn.disabled  = true;
@@ -286,7 +322,6 @@ async function startSTT(){
     recognition = null;
   };
 
-  // 시작
   try {
     recognition.start();
   } catch (err) {
@@ -300,7 +335,7 @@ async function startSTT(){
 function stopSTT(){
   try {
     if (recognition && recogRunning) {
-      recognition.stop(); // onend에서 버튼/상태 정리
+      recognition.stop();
     }
   } catch (e) {
     bubbleAI('STT 정지 오류: ' + (e?.message || e));
