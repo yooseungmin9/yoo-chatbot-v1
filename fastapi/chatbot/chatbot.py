@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, UploadFile, File, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from contextlib import asynccontextmanager
 
 from openai import OpenAI
 from pymongo import MongoClient, DESCENDING
@@ -53,7 +54,13 @@ SYSTEM_INSTRUCTIONS = """
 - 가능하면 '제목(링크) · 발행일(KST) · 한줄 요약' 구조를 쓴다.
 - 어려운 용어는 괄호로 짧게 보충한다. (예: 리프라이싱=재가격조정)
 - 에러/빈결과는 한 줄로 원인 + 1가지 대안만 제시한다.
-- TTS기능을 사용해야 하기 때문에 사용자에게 말하듯 답하라(이모티콘 사용 금지) 
+
+답변 형식:
+- TTS로 읽어야 하므로, 자연스러운 말투로 답하라.
+- 각 뉴스는 "첫 번째는 [제목]입니다. [날짜]에 발행되었습니다." 형식으로 말하라.
+- 링크나 특수문자(괄호, 대괄호 등)는 절대 읽지 마라.
+- 날짜는 "10월 23일 오후 12시" 같은 자연스러운 한국어로 바꿔라.
+- 3~5개 뉴스만 요약하고, "자세한 내용은 화면을 확인해주세요"로 마무리하라.
 
 도구 사용 정책:
 - 최신 뉴스/핫이슈: get_latest_news
@@ -61,6 +68,10 @@ SYSTEM_INSTRUCTIONS = """
 - 주가지수/환율: get_market
 - 웹서비스 기능/사용법/도움말: search_docs
 - 그 외 일반 질문은 도구 없이 답하라. (GPT-5모델)
+
+중요: 
+원시 데이터(링크, 특수문자, 날짜코드)를 그대로 출력하지 마라. 
+항상 사용자가 듣기 편한 자연스러운 문장으로 변환하라.
 """
 
 # ===== Function Calling 스키마 =====
@@ -197,17 +208,29 @@ def fetch_latest_topn_from_mongo(n: int = 5):
     return rows
 
 def format_topn_md(rows):
-    # 뉴스 목록을 간단한 MD 텍스트로 변환
-    if not rows: return "최신 경제 뉴스가 없습니다."
-    out = ["**최신 경제 뉴스**"]
+    """뉴스 목록을 TTS 친화적인 자연스러운 문장으로 변환"""
+    if not rows:
+        return "현재 최신 경제 뉴스가 없습니다."
+    
+    out = ["최신 경제 뉴스를 알려드리겠습니다.\n"]
+    
     for i, r in enumerate(rows, 1):
-        title = (r.get("title") or "").strip() or "(제목 없음)"
-        url = (r.get("url") or "").strip()
+        title = (r.get("title") or "").strip() or "제목 없음"
         date = r.get("published_at", "")
-        if url:
-            out.append(f"{i}. [{title}]\n출처: ({url}) · 날짜: {date}")
+        
+        # 간단한 날짜 포맷 (2025-10-23 -> 10월 23일)
+        if date and len(date) >= 10:
+            try:
+                year, month, day = date[:10].split('-')
+                date_readable = f"{int(month)}월 {int(day)}일"
+            except:
+                date_readable = date
         else:
-            out.append(f"{i}. {title} · {date}")
+            date_readable = "날짜 정보 없음"
+        
+        # TTS 친화적 문장
+        out.append(f"{i}번째 뉴스입니다. {title}. {date_readable}에 발행되었습니다.\n")
+    
     return "\n".join(out)
 
 # ===== FRED =====
@@ -623,7 +646,7 @@ def run_tool(tool_name: str, arguments: dict) -> dict:
         elif tool_name == "search_docs":
             q = arguments.get("query") or ""
             resp = client.responses.create(
-                model="gpt-5",
+                model="gpt-4o-mini",
                 instructions=SYSTEM_INSTRUCTIONS,
                 tools=[{"type": "file_search", "vector_store_ids": [VS_ID]}],
                 input=[{"role":"user","content":[{"type":"input_text","text":q}]}],
@@ -689,7 +712,7 @@ async def chat(payload: dict = Body(...)):
     try:
         # 1차 응답(도구 사용 여부 판단)
         comp = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o-mini",
             messages=msgs,
             tools=TOOLS,
             tool_choice="auto",
@@ -706,7 +729,7 @@ async def chat(payload: dict = Body(...)):
                 tool_msgs.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
 
             final = client.chat.completions.create(
-                model="gpt-5",
+                model="gpt-4o-mini",
                 messages=msgs + [msg] + tool_msgs
             )
             answer = final.choices[0].message.content or "응답 생성 실패"
@@ -916,20 +939,22 @@ def _job_naver():
     except Exception as e:
         log.exception("네이버 수집 실패: %s", e)
 
-@app.on_event("startup")
-def _start_scheduler():
-    # Mongo 인덱스 확인
-    try:
-        _ensure_indexes()
-    except Exception as e:
-        log.exception("인덱스 생성 실패")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ===== Startup =====
+    def _start_scheduler():
+        # Mongo 인덱스 확인
+        try:
+            _ensure_indexes()
+        except Exception as e:
+            log.exception("인덱스 생성 실패")
 
     # 스케줄러 시작
     try:
         scheduler.add_job(
             _job_naver,
             "interval",
-            minutes=10, # hours=1
+            minutes=5,  # hours=1
             id="naver_hourly",
             max_instances=1,
             coalesce=True,
@@ -939,9 +964,13 @@ def _start_scheduler():
         log.info("APScheduler started.")
     except Exception:
         log.exception("APScheduler 시작 실패")
-
-@app.on_event("shutdown")
-def _stop_scheduler():
+    
+    # 인덱스 생성 실행
+    _start_scheduler()
+    
+    yield
+    
+    # ===== Shutdown =====
     try:
         scheduler.shutdown()
         log.info("APScheduler stopped.")

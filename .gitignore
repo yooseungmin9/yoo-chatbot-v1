@@ -670,3 +670,16 @@ run_many.py
 .env.*
 
 !*.example
+
+# === 프로젝트별 보안/설정 파일 (추가) ===
+
+# GCP 서비스 계정 키
+key/absolute-text-473306111-c1-0c6c16c73bfa.json
+key/*.json
+
+# OpenAI Vector Store 상태 파일
+.vs_state.json
+.vector_store_id
+
+# 스테이징 디렉토리
+.staging/
