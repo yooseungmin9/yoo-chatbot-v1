@@ -10,21 +10,32 @@ import os, logging, subprocess, io, requests, tempfile, re, shutil, json
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from contextlib import asynccontextmanager
+import httpx
+import asyncio
 
 from openai import OpenAI
 from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.cloud import texttospeech
 from google.oauth2 import service_account
-
+import html
+from crawler_rag import crawl_today
 import yfinance as yf
+
+
+
 import pandas as pd
+
+# ===== 환경변수 로드 =====
+load_dotenv(override=True)
 
 # ===== 로깅 =====
 # 전역 로거 설정 (레벨/포맷)
@@ -57,7 +68,6 @@ SYSTEM_INSTRUCTIONS = """
 
 답변 형식:
 - TTS로 읽어야 하므로, 자연스러운 말투로 답하라.
-- 각 뉴스는 "첫 번째는 [제목]입니다. [날짜]에 발행되었습니다." 형식으로 말하라.
 - 링크나 특수문자(괄호, 대괄호 등)는 절대 읽지 마라.
 - 날짜는 "10월 23일 오후 12시" 같은 자연스러운 한국어로 바꿔라.
 - 3~5개 뉴스만 요약하고, "자세한 내용은 화면을 확인해주세요"로 마무리하라.
@@ -170,13 +180,25 @@ else:
 
 # ===== MongoDB =====
 # 연결정보/DB/컬렉션 상수
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://Dgict_TeamB:team1234@cluster0.5d0uual.mongodb.net/")
-DB_NAME = "test123"
-COLL_NAME = "chatbot_rag"
+MONGO_URI = "mongodb://localhost:27017"
+DB_NAME = "local"
+COLL_NAME = "chatbot1_rag"
+
+_mongo_client = None
+
+def _get_mongo_client():
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = MongoClient(
+            MONGO_URI,
+            maxPoolSize=50,  # 최대 연결 수
+            minPoolSize=10,  # 최소 연결 수
+            serverSelectionTimeoutMS=3000
+        )
+    return _mongo_client
 
 def _get_db():
-    # DB 핸들 반환
-    return MongoClient(MONGO_URI)[DB_NAME]
+    return _get_mongo_client()[DB_NAME]
 
 def _ensure_indexes():
     # 최신 정렬용 인덱스 구성
@@ -212,24 +234,17 @@ def format_topn_md(rows):
     if not rows:
         return "현재 최신 경제 뉴스가 없습니다."
     
-    out = ["최신 경제 뉴스를 알려드리겠습니다.\n"]
+    # 오늘 날짜
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("Asia/Seoul"))
+    date_readable = f"{today.month}월 {today.day}일"
+    
+    out = [f"{date_readable} 최신 경제 뉴스를 알려드리겠습니다.\n"]
     
     for i, r in enumerate(rows, 1):
         title = (r.get("title") or "").strip() or "제목 없음"
-        date = r.get("published_at", "")
-        
-        # 간단한 날짜 포맷 (2025-10-23 -> 10월 23일)
-        if date and len(date) >= 10:
-            try:
-                year, month, day = date[:10].split('-')
-                date_readable = f"{int(month)}월 {int(day)}일"
-            except:
-                date_readable = date
-        else:
-            date_readable = "날짜 정보 없음"
-        
-        # TTS 친화적 문장
-        out.append(f"{i}번째 뉴스입니다. {title}. {date_readable}에 발행되었습니다.\n")
+        out.append(f"{i}번째 뉴스는 {title}입니다.\n")
     
     return "\n".join(out)
 
@@ -240,37 +255,85 @@ FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
 # ===== FRED 조회 유틸 =====
 # 관측치 조회(빈값 필터), FEDFUNDS/목표범위 처리
-def _fred_observations(series_id: str, start: str = "2024-01-01") -> list:
+async def _fred_observations_async(series_id: str, start: str = "2024-01-01") -> list:
     params = {
         "series_id": series_id,
         "api_key": FRED_KEY,
         "file_type": "json",
         "observation_start": start
     }
-    r = requests.get(FRED_BASE, params=params, timeout=20)
-    r.raise_for_status()
-    obs = r.json().get("observations", []) or []
-    return [o for o in obs if o.get("value") not in ("", ".")]
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(FRED_BASE, params=params)
+        r.raise_for_status()
+        obs = r.json().get("observations", []) or []
+        return [o for o in obs if o.get("value") not in ("", ".")]
 
 def get_us_fed_funds_latest(use_target_range: bool = False) -> dict:
-    # FEDFUNDS(월) 또는 DFEDTARU/L(일) 최신값 반환
+    """FEDFUNDS(월) 또는 DFEDTARU/L(일) 최신값 반환"""
     try:
         if use_target_range:
-            up = _fred_observations("DFEDTARU")
-            lo = _fred_observations("DFEDTARL")
+            # 목표 범위 상한/하한 동시 조회
+            up_params = {
+                "series_id": "DFEDTARU",
+                "api_key": FRED_KEY,
+                "file_type": "json",
+                "observation_start": "2024-01-01"
+            }
+            lo_params = {
+                "series_id": "DFEDTARL",
+                "api_key": FRED_KEY,
+                "file_type": "json",
+                "observation_start": "2024-01-01"
+            }
+            
+            up_r = requests.get(FRED_BASE, params=up_params, timeout=20)
+            lo_r = requests.get(FRED_BASE, params=lo_params, timeout=20)
+            
+            up_r.raise_for_status()
+            lo_r.raise_for_status()
+            
+            # 빈 값 필터링
+            up = [o for o in up_r.json().get("observations", []) if o.get("value") not in ("", ".")]
+            lo = [o for o in lo_r.json().get("observations", []) if o.get("value") not in ("", ".")]
+            
             if not up or not lo:
                 raise RuntimeError("target range observations empty")
+            
             up_last, lo_last = up[-1], lo[-1]
             date = up_last["date"]
             upper = float(up_last["value"])
             lower = float(lo_last["value"])
-            return {"date": date, "value": upper, "lower": lower, "upper": upper, "unit": "%", "source": "FRED"}
+            return {
+                "date": date,
+                "value": upper,
+                "lower": lower,
+                "upper": upper,
+                "unit": "%",
+                "source": "FRED"
+            }
         else:
-            obs = _fred_observations("FEDFUNDS")
+            # FEDFUNDS 단일 조회
+            params = {
+                "series_id": "FEDFUNDS",
+                "api_key": FRED_KEY,
+                "file_type": "json",
+                "observation_start": "2024-01-01"
+            }
+            r = requests.get(FRED_BASE, params=params, timeout=20)
+            r.raise_for_status()
+            
+            obs = [o for o in r.json().get("observations", []) if o.get("value") not in ("", ".")]
+            
             if not obs:
                 raise RuntimeError("fedfunds observations empty")
+            
             last = obs[-1]
-            return {"date": last["date"], "value": float(last["value"]), "unit": "%", "source": "FRED"}
+            return {
+                "date": last["date"],
+                "value": float(last["value"]),
+                "unit": "%",
+                "source": "FRED"
+            }
     except requests.Timeout:
         return {"error": "FRED 응답 지연(Timeout)", "source": "FRED"}
     except Exception as e:
@@ -507,21 +570,21 @@ def fetch_quote_yf(ticker: str) -> Dict[str, Any]:
         "changePct": _round_or_none(change_pct, 2),
         "ts_kst": last_ts_kst or datetime.now(KST).isoformat()
     }
-
+    
 def get_market_indices() -> str:
-    # 주요 지수 요약 문자열 생성
+    """주요 지수 동기 조회"""
     results = []
     for key, info in INDEX_MAP.items():
-        q = fetch_quote_yf(info["ticker"])
+        q = fetch_quote_yf_with_cache(info["ticker"])  # 캐싱 버전 사용
         name, price, pct = info["name"], q.get("price"), q.get("changePct")
         if price is not None:
             if pct is not None:
                 sign = "+" if pct >= 0 else ""
-                results.append(f"• **{name}**: {price:,.2f} ({sign}{pct:.2f}%)")
+                results.append(f"**{name}**: {price:,.2f} ({sign}{pct:.2f}%)")
             else:
-                results.append(f"• **{name}**: {price:,.2f}")
+                results.append(f"**{name}**: {price:,.2f}")
         else:
-            results.append(f"• **{name}**: 데이터 없음")
+            results.append(f"**{name}**: 데이터 없음")
     return "**주요 지수 (실시간)**\n" + "\n".join(results)
 
 def get_fx_rates() -> str:
@@ -574,6 +637,15 @@ def get_eur_usd() -> str:
     if price is None: return "**유로/달러 환율**\n• 현재 데이터를 가져올 수 없습니다."
     sign = "+" if (ch or 0) >= 0 else ""
     return f"**유로/달러 환율 (실시간)**\n• 현재: {price:,.2f}달러\n• 변동: {sign}{(ch or 0):.2f} ({sign}{(pct or 0):.2f}%)"
+
+@lru_cache(maxsize=1000)
+def _cached_fetch_quote_yf(ticker: str, cache_key: str) -> Dict[str, Any]:
+    return fetch_quote_yf(ticker)
+
+def fetch_quote_yf_with_cache(ticker: str) -> Dict[str, Any]:
+    # 5분 단위로 캐시 키 생성
+    cache_key = datetime.now().strftime("%Y%m%d%H%M")[:-1]  # 마지막 자리 제거
+    return _cached_fetch_quote_yf(ticker, cache_key)
 
 # ===== 도구 실행기 =====
 # Function Call 이름 → 실제 함수 라우팅/출력 포맷
@@ -659,13 +731,6 @@ def run_tool(tool_name: str, arguments: dict) -> dict:
         log.exception("Tool execution failed")
         return {"ok": False, "error": str(e)}
 
-# ===== FastAPI 앱/CORS =====
-# 앱 인스턴스 생성, 전역 CORS 허용(데모 편의)
-app = FastAPI(title="Chat+RAG+News+Indicators (Function Calling)")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"],
-)
 # ===== 세션 메모리 =====
 # 간단한 인메모리 대화 히스토리 (최근 20턴)
 SESSIONS: Dict[str, List[Dict[str, str]]] = {}
@@ -682,6 +747,68 @@ def add_turn(session_id: str, role: str, content: str):
     sess.append({"role": role, "content": content})
     if len(sess) > 2 * MAX_TURNS:
         SESSIONS[session_id] = sess[-2*MAX_TURNS:]
+
+# ===== 뉴스 크롤러 스케줄러 =====
+# 네이버 크롤러 주기 실행 (10분) 테스트 후, 1시간 간격
+scheduler = BackgroundScheduler(timezone=KST)
+
+def _job_naver():
+    try:
+        log.info("네이버 뉴스 크롤링 시작...")
+        crawl_today(limit_per_run=50)
+        log.info("네이버 뉴스 크롤링 완료")
+    except Exception as e:
+        log.exception(f"크롤링 실패: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ===== Startup =====
+    # MongoDB 인덱스 생성
+    try:
+        _ensure_indexes()
+        log.info("MongoDB 인덱스 생성 완료")
+    except Exception as e:
+        log.exception("인덱스 생성 실패")
+
+    # 스케줄러 시작
+    try:
+        scheduler.add_job(
+            _job_naver,
+            "interval",
+            minutes=10,  # 1시간마다 실행
+            id="naver_hourly",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+        scheduler.start()
+        log.info("APScheduler started.")
+    except Exception:
+        log.exception("APScheduler 시작 실패")
+    
+    yield
+    
+    # ===== Shutdown =====
+    try:
+        scheduler.shutdown()
+        log.info("APScheduler stopped.")
+    except Exception:
+        log.exception("APScheduler 종료 실패")
+
+# ===== FastAPI 앱/CORS =====
+# 앱 인스턴스 생성, 전역 CORS 허용(데모 편의)
+app = FastAPI(
+    title="Chat+RAG+News+Indicators (Function Calling)",
+    lifespan=lifespan  # 이 부분 추가!
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=False, 
+    allow_methods=["*"], 
+    allow_headers=["*"],
+)
 
 # ===== 메인 챗 엔드포인트 =====
 # 사용자 메시지 → OpenAI → (필요시) 함수 호출 → 최종 답변
@@ -855,11 +982,26 @@ def tts_google_post(payload: dict = Body(...)):
     fmt = payload.get("fmt") or "MP3"
     rate = float(payload.get("rate") or 1.0)
     pitch = float(payload.get("pitch") or 0.0)
+
+    # 줄바꿈 및 특수문자 정리
+    text = html.unescape(text)
+    text = re.sub(r'<br\s*/?>', ' ', text)
+    text = re.sub(r'<[^>]+>', '', text)   
+    text = text.replace('\n', ' ')
+    text = text.replace('\r', ' ')
+    text = text.replace('\t', ' ')
+    text = text.replace('\'', '')
+    text = text.replace("'", '')  # 작은따옴표 제거
+    text = text.replace('"', '')  # 큰따옴표 제거
+    text = text.replace('…', '')
+    text = text.replace('·', ' ')
+    text = re.sub(r'\s+', ' ', text).strip() # 중복 공백 제거
+    
     if not text:
         return JSONResponse({"error": "text is required"}, status_code=400)
 
     # 서비스계정 키 경로 검증/자격 생성
-    GCP_KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+    GCP_KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     if not GCP_KEY_PATH or not os.path.exists(GCP_KEY_PATH):
         return JSONResponse({"error": "GCP 서비스계정 키 경로가 올바르지 않습니다."}, status_code=400)
     gcp_credentials = service_account.Credentials.from_service_account_file(
@@ -927,52 +1069,3 @@ async def reset():
 @app.get("/health")
 def health():
     return {"status": "ok", "ts_kst": datetime.now(KST).isoformat()}
-
-# ===== 스케줄러 =====
-# 네이버 크롤러 주기 실행 (10분) 테스트 후, 1시간 간격
-scheduler = BackgroundScheduler(timezone=KST)
-
-def _job_naver():
-    try:
-        from crawler_rag import crawl_today
-        crawl_today(limit_per_run=50)
-    except Exception as e:
-        log.exception("네이버 수집 실패: %s", e)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # ===== Startup =====
-    def _start_scheduler():
-        # Mongo 인덱스 확인
-        try:
-            _ensure_indexes()
-        except Exception as e:
-            log.exception("인덱스 생성 실패")
-
-    # 스케줄러 시작
-    try:
-        scheduler.add_job(
-            _job_naver,
-            "interval",
-            minutes=5,  # hours=1
-            id="naver_hourly",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=60,
-        )
-        scheduler.start()
-        log.info("APScheduler started.")
-    except Exception:
-        log.exception("APScheduler 시작 실패")
-    
-    # 인덱스 생성 실행
-    _start_scheduler()
-    
-    yield
-    
-    # ===== Shutdown =====
-    try:
-        scheduler.shutdown()
-        log.info("APScheduler stopped.")
-    except Exception:
-        log.exception("APScheduler 종료 실패")

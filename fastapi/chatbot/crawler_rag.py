@@ -12,14 +12,17 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
+
 from dateutil import parser
+import logging
 
 
 # ===== MongoDB 연결/컬렉션 준비 =====
 # 고정 접속정보/DB/컬렉션; url 유니크 인덱스로 중복 방지
-MONGO_URI = "mongodb+srv://Dgict_TeamB:team1234@cluster0.5d0uual.mongodb.net/"
-DB_NAME   = "test123"
-COLL_NAME = "chatbot_rag"
+MONGO_URI = "mongodb://localhost:27017"
+DB_NAME = "local"
+COLL_NAME = "chatbot1_rag"
 
 def get_collection():
     """Mongo 컬렉션 반환 + url 유니크 인덱스 보장"""
@@ -50,6 +53,9 @@ OIDS: Dict[str, str] = {
     "053":"주간조선","127":"기자협회보","658":"국제신문","665":"더스쿠프","353":"중앙SUNDAY","145":"레이디경향"
 }
 
+_session = requests.Session()
+_session.headers.update(UA)
+
 def build_url(date: str, page: int) -> str:
     """경제 섹션(sid1=101)에서 날짜/페이지 기준 목록 URL 생성"""
     return f"{BASE_LIST}?mode=LSD&mid=sec&sid1=101&date={date}&page={page}"
@@ -61,9 +67,13 @@ def extract_links(html: str) -> List[tuple]:
     return [(a.get_text(strip=True), a.get("href","")) for a in anchors if "/article/" in a.get("href","")]
 
 def fetch_article(link: str) -> Dict[str, str]:
-    """기사 상세 페이지에서 제목/본문/이미지/언론사/발행시각 파싱"""
-    r = requests.get(link, headers=UA, timeout=10)
-    r.raise_for_status()
+    try:
+        r = _session.get(link, timeout=3)
+        r.raise_for_status()
+    except Exception as e:
+        logging.warning(f"[SKIP] {link}: {e}")
+        return {"title": "", "content": "", "image": "", "press": "", "published_at": None}
+    
     s = BeautifulSoup(r.text, "html.parser")
 
     # 제목(표준/구버전/OG 메타 대응)
@@ -118,7 +128,7 @@ def crawl_today(limit_per_run: int = 50):
     while inserted < limit_per_run:
         url = build_url(today_str, page)
         try:
-            res = requests.get(url, headers=UA, timeout=10)
+            res = _session.get(url, timeout=3)
             res.raise_for_status()
         except Exception as e:
             logging.warning("[목록 실패] %s (%s)", url, e)
@@ -151,13 +161,15 @@ def crawl_today(limit_per_run: int = 50):
                 "image": art["image"],
                 "press": art["press"],
                 "main_section": "경제",
-                "published_at": art["published_at"].isoformat(),  # 원문 타임존 보존
-                "collected_at": datetime.now(KST).isoformat(),    # 수집 시각(KST)
+                "published_at": art["published_at"],
+                "collected_at": datetime.now(KST),
             }
             try:
                 col.insert_one(doc)
                 inserted += 1
                 logging.info("[OK %d/%d] %s", inserted, limit_per_run, link)
+            except DuplicateKeyError:
+                continue  # 중복 URL 스킵
             except Exception as e:
                 logging.warning("[SKIP] 저장 실패: %s", e)
 

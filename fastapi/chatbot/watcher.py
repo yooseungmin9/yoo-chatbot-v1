@@ -9,6 +9,7 @@ from watchdog.events import FileSystemEventHandler
 from openai import OpenAI
 from dotenv import load_dotenv
 
+# ===== 환경변수 로드 =====
 load_dotenv(override=True)
 
 # ===== OpenAI API 키 =====
