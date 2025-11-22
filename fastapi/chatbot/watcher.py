@@ -7,10 +7,23 @@ from typing import Dict
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # ===== OpenAI API 키 =====
 # 환경변수 OPENAI_API_KEY 사용(미설정이면 빈 문자열)
-API_KEY = os.getenv("OPENAI_API_KEY", "")
+API_KEY = os.getenv("OPENAI_API_KEY")
+
+print(f"[DEBUG] API_KEY value: '{API_KEY}'")
+print(f"[DEBUG] API_KEY type: {type(API_KEY)}")
+if API_KEY:
+    print(f"[DEBUG] API_KEY length: {len(API_KEY)}")
+    print(f"[DEBUG] First 15 chars: {API_KEY[:15]}")
+    print(f"[DEBUG] Starts with 'sk-': {API_KEY.startswith('sk-')}")
+else:
+    print("[ERROR] API_KEY is None or empty!")
+    exit(1)
 
 # ===== 기본 경로/상태 파일 =====
 # 감시 대상/스테이징/상태파일/벡터스토어ID 파일 경로 정의

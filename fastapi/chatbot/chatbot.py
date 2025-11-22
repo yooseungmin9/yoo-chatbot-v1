@@ -36,8 +36,10 @@ KST = ZoneInfo("Asia/Seoul")
 
 # ===== OpenAI =====
 # OPENAI_API_KEY 환경변수 사용, 고정 UA 부여
-API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = OpenAI(api_key=API_KEY, default_headers={"User-Agent": "dgict-bot/1.0"})
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    default_headers={"User-Agent": "dgict-bot/1.0"}
+)
 
 # =============================================================
 # CHATBOT (RAG + 뉴스 + 지표 + 시세 + Function Calling + 세션/라우트)
