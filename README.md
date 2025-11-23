@@ -3,7 +3,7 @@
 > **기획 및 운영, 챗봇 담당** : 유승민
 > - 시연 영상 - 01:54 부분  
 > https://www.youtube.com/watch?v=Bk_dYeuUDCE
-> - 코드 개선 사항 **Notion 링크** - 11.23 최신화   
+> - 코드 개선 사항 Notion 링크 - 11.23 최신화   
 > https://www.notion.so/yoo-chatbot-v1-2b3ca2ee78bc80bba29de68cc55027a2?source=copy_link
 ---
 
