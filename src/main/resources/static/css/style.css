@@ -111,7 +111,7 @@ html[data-theme="dark"] body::before {
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  padding: 20px 0;
+  padding: 10px 10px;
 }
 
 .container {
@@ -143,7 +143,7 @@ html[data-theme="dark"] body::before {
 
 /* ===== Theme Toggle ===== */
 .theme-toggle {
-  position: fixed;
+  position: absolute;
   top: 20px;
   right: 20px;
   z-index: 1000;
@@ -565,7 +565,7 @@ audio {
   flex-direction: row;
 }
 
-/* ===== 테블릿 최적화  ===== */
+/* ===== 테블릿 최적화  ===== */@
 @media (max-width: 768px) {
   .container {
     padding: 10px;
@@ -579,10 +579,8 @@ audio {
   }
 }
 
-/* ===== 모바일 최적화 ===== */
 @media (max-width: 480px) {
   html, body {
-    /* 뷰포트 꽉 차게, 배경 여백도 적당히 */
     height: 100%;
     background: var(--bg-primary);
   }
@@ -593,45 +591,60 @@ audio {
     min-height: 100vh;
     box-sizing: border-box;
   }
+
+  .theme-toggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 1000;
+  }
+
+  .toggle-btn {
+  width: 45px;
+  height: 45px;
+  }
+
   .container {
     max-width: 100vw;
     width: 100vw;
     min-height: 100vh;
     margin: 0 auto;
     border-radius: 0;
-    padding: 8px 0 8px 0;
+    padding: 8px 16px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 8px;
     background: none;
+    border-radius: 10px;
   }
   .page-title {
     font-size: 1.5em;
-    margin-bottom: 9px;
+    margin-bottom: 12px;
     margin-top: 8px;
   }
   .global-controls {
     margin-bottom: 7px;
-    padding: 0 12px;
+    padding: 0;
   }
   .chatbot-container {
     margin: 0;
-    padding: 0 0 0 0;
-    width: 100vw;
+    padding: 0;
+    width: 100%;
     box-sizing: border-box;
     background: var(--bg-secondary);
     border-radius: 0;
+    border-radius: 10px;
   }
   .chat-messages {
-    padding: 12px;
+    padding: 10px 0;
     gap: 8px;
     min-height: 200px;
     box-sizing: border-box;
     width: 100%;
   }
   .chat-form {
-    padding: 10px 12px 7px 12px;
+    padding: 10px;
     margin: 0;
     box-sizing: border-box;
     width: 100%;
@@ -640,11 +653,12 @@ audio {
     display: flex;
     gap: 10px;
     width: 100%;
+    padding: 10px;
   }
   .btn {
     flex: 1 1 0;
     min-width: 48px;
-    padding: 12px 4px;
+    padding: 12px 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -652,8 +666,10 @@ audio {
     border-radius: 9px;
   }
   .message {
-    margin-bottom: 7px;
+    margin-bottom: 0;
+    padding: 0 10px 0 10px;
   }
+
   /* 예시 질문(FAQ) */
   .faq-row {
     display: flex;
@@ -661,13 +677,13 @@ audio {
     gap: 12px;
     width: 100%;
     margin: 12px 0 8px 0;
-    padding: 0 14px;
+    padding: 0;
     box-sizing: border-box;
   }
   .faq-item {
     width: 100%;
     text-align: left;
-    padding: 11px 20px;
+    padding: 11px 0;
     border-radius: 10px;
     font-size: 15px !important;
     background: var(--bg-secondary);
@@ -675,10 +691,9 @@ audio {
     transition: background 0.2s, color 0.2s;
     box-sizing: border-box;
   }
-  #langSelect, #resetBtn {
-    font-size: 13px;
+  #ttsBtn, #faqBtn {
+    display: none !important;
   }
-}
 
 /* 다크모드 전환 애니메이션 부드럽게 */
 .no-transition * {

@@ -683,3 +683,7 @@ key/*.json
 
 # 스테이징 디렉토리
 .staging/
+
+.env
+key/
+*.json

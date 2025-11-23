@@ -30,8 +30,6 @@ import html
 from crawler_rag import crawl_today
 import yfinance as yf
 
-
-
 import pandas as pd
 
 # ===== 환경변수 로드 =====
@@ -53,6 +51,16 @@ client = OpenAI(
     default_headers={"User-Agent": "dgict-bot/1.0"}
 )
 
+# ===== OpenAI 모델 파인 튜닝 =====
+# file =OpenAI.File.create(file=open("training_data.jsonl", "rb"), purpose="fine-tune")
+# print(file.id)
+
+# job = OpenAI.FineTuningJob.create(
+#     training_file=file.id,
+#     model="gpt-4o-mini"
+# )
+# print(job.id)
+
 # =============================================================
 # CHATBOT (RAG + 뉴스 + 지표 + 시세 + Function Calling + 세션/라우트)
 # =============================================================
@@ -73,11 +81,10 @@ SYSTEM_INSTRUCTIONS = """
 - 3~5개 뉴스만 요약하고, "자세한 내용은 화면을 확인해주세요"로 마무리하라.
 
 도구 사용 정책:
-- 최신 뉴스/핫이슈: get_latest_news
-- 경제지표(CPI, PPI, GDP, 기준금리/무역수지/경상수지, 미국 금리): get_indicator
-- 주가지수/환율: get_market
-- 웹서비스 기능/사용법/도움말: search_docs
-- 그 외 일반 질문은 도구 없이 답하라. (GPT-5모델)
+- 실시간 정보(뉴스, 주가지수/환율, 경제지표, 시세)는 반드시 지정된 도구(get_latest_news, get_market, get_indicator)를 직접 호출해 결과를 받아 출력하라.
+- 모든 주가/환율/지표 질문에는 get_market 또는 get_indicator 함수 호출을 최우선으로 적용하고, 만약 도구 결과가 없을 때만 “확인할 수 없음” 답변을 생성하라.
+- 웹서비스 기능/도움말 질문에는 search_docs 도구를 적용하라.
+- 도구를 활용하지 않는 답변은 일반적인 개념 설명, 예시, 해설 질문(일반 GPT-4o-mini모델 답변)만 허용된다.
 
 중요: 
 원시 데이터(링크, 특수문자, 날짜코드)를 그대로 출력하지 마라. 
@@ -91,11 +98,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_latest_news",
-            "description": "MongoDB에서 최신 경제 뉴스 N건을 조회한다.",
+            "description": "MongoDB에 저장된 최신 경제 뉴스 N건을 실시간으로 조회하여 제목과 발행일, 요약을 반환합니다. 항상 최신 뉴스는 이 함수로 조회하세요.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "count": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5}
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 5,
+                        "description": "조회할 최신 뉴스 개수 (1~20)"
+                    }
                 },
                 "required": ["count"]
             }
@@ -105,7 +118,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_indicator",
-            "description": "경제지표 조회 (ECOS: CPI/PPI/GDP/기준금리/무역수지/경상수지, FRED: 미국 금리).",
+            "description": "실시간 경제지표 조회 함수입니다. 지정된 indicator_type(CPI, PPI, GDP, BASE_RATE, TRADE_BALANCE, CURRENT_ACCOUNT, US_FEDFUNDS, US_FED_TARGET)에 대해 ECOS/FRED 등의 API에서 최신값 또는 최근 변동을 반환합니다. 경제지표 질문에는 반드시 이 함수를 사용하세요.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -114,7 +127,8 @@ TOOLS = [
                         "enum": [
                             "CPI", "PPI", "GDP", "BASE_RATE", "TRADE_BALANCE", "CURRENT_ACCOUNT",
                             "US_FEDFUNDS", "US_FED_TARGET"
-                        ]
+                        ],
+                        "description": "조회할 경제지표 종류"
                     }
                 },
                 "required": ["indicator_type"]
@@ -125,7 +139,7 @@ TOOLS = [
       "type": "function",
       "function": {
         "name": "get_market",
-        "description": "주요 지수/환율 및 개별 종목 시세를 조회한다.",
+        "description": "실시간 주가/지수/환율/종목 시세를 조회합니다. market_type(예: KOSPI, USD_KRW, MARKETA_SUMMARY, QUOTE)을 지정하며, 개별 주식은 ticker(예: NVDA, ORCL, AAPL, 삼성전자 등) 값을 함께 입력하세요. 반드시 시세 질문에는 이 함수를 호출하세요.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -139,11 +153,12 @@ TOOLS = [
                 "JPY_KRW",
                 "EUR_USD",
                 "QUOTE"
-              ]
+              ],
+              "description": "조회할 시장/시세 종류"
             },
             "ticker": {
               "type": "string",
-              "description": "개별 종목 심볼 (예: NVDA, AAPL, 005930.KS, 086520.KQ)"
+              "description": "개별 종목 심볼 (예: NVDA, ORCL, AAPL, 005930.KS 등)"
             }
           },
           "required": ["market_type"]
@@ -155,11 +170,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_docs",
-            "description": "웹서비스 기능/도움말은 파일검색(RAG)로 문서를 바탕으로 답한다.",
+            "description": "웹서비스 사용법/기능/도움말 관련 질문은 검색엔진 기반 RAG에서 답변합니다. 파일 기반 문서 검색을 반드시 이 함수로 사용하세요.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"}
+                    "query": {
+                        "type": "string",
+                        "description": "검색할 질문(키워드/문장)"
+                    }
                 },
                 "required": ["query"]
             }
@@ -718,7 +736,7 @@ def run_tool(tool_name: str, arguments: dict) -> dict:
         elif tool_name == "search_docs":
             q = arguments.get("query") or ""
             resp = client.responses.create(
-                model="gpt-4o-mini",
+                model="ft:gpt-4o-mini-2024-07-18:personal:yoo-chatbot1:Cf00a3qm",
                 instructions=SYSTEM_INSTRUCTIONS,
                 tools=[{"type": "file_search", "vector_store_ids": [VS_ID]}],
                 input=[{"role":"user","content":[{"type":"input_text","text":q}]}],
@@ -842,7 +860,7 @@ async def chat(payload: dict = Body(...)):
     try:
         # 1차 응답(도구 사용 여부 판단)
         comp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="ft:gpt-4o-mini-2024-07-18:personal:yoo-chatbot1:Cf00a3qm",
             messages=msgs,
             tools=TOOLS,
             tool_choice="auto",
@@ -859,7 +877,7 @@ async def chat(payload: dict = Body(...)):
                 tool_msgs.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
 
             final = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="ft:gpt-4o-mini-2024-07-18:personal:yoo-chatbot1:Cf00a3qm",
                 messages=msgs + [msg] + tool_msgs
             )
             answer = final.choices[0].message.content or "응답 생성 실패"
