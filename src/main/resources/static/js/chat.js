@@ -62,6 +62,8 @@ const sttStopBtn  = document.getElementById("sttStopBtn");
 const ttsBtn      = document.getElementById("ttsBtn");
 const ttsAudio    = document.getElementById("ttsAudio");
 
+const typingIndicator = document.getElementById("typingIndicator");
+
 // 다크모드 관련 DOM
 const themeToggleBtn = document.getElementById("themeToggleBtn");
 const themeIcon = themeToggleBtn?.querySelector(".theme-icon");
@@ -113,34 +115,49 @@ const escapeHtml = (s)=>String(s||"").replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&
 const mdSafe = (text)=> escapeHtml(text).replace(/^-\s/gm,"• ").replace(/\n/g,"<br>");
 const scrollToBottom = ()=>{ chatEl.scrollTop = chatEl.scrollHeight; };
 
+// 타이핑 인디케이터 표시 (말풍선 형태로 생성)
+function showTyping() {
+  const typingHTML = `
+    <div id="typingIndicator" class="message bot-message">
+      <div class="message-content">
+        <div class="typing-indicator">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+      </div>
+    </div>
+  `;
+  chatEl.insertAdjacentHTML("beforeend", typingHTML);
+  scrollToBottom();
+}
+
+// 타이핑 인디케이터 제거
+function hideTyping() {
+  const indicator = document.getElementById("typingIndicator");
+  if (indicator) {
+    indicator.remove();
+  }
+}
+
+// 메시지 버블 함수들
 function bubbleUser(text){
   chatEl.insertAdjacentHTML("beforeend",
     `<div class="message user-message"><div class="message-content">${escapeHtml(text)}</div></div>`);
   scrollToBottom();
 }
+
 function bubbleAI(html){
   chatEl.insertAdjacentHTML("beforeend",
     `<div class="message bot-message"><div class="message-content" data-tts="${escapeHtml(html).replace(/<[^>]+>/g,'')}">${html}</div></div>`);
   scrollToBottom();
 }
+
 function bubbleStatus(text){
   chatEl.insertAdjacentHTML("beforeend",
-    `<div class="message bot-message"><div class="message-content muted">${escapeHtml(text)}</div></div>`);
+    `<div class="message bot-message"><div class="message-content" style="opacity: 0.6; font-size: 0.9em;">${escapeHtml(text)}</div></div>`);
   scrollToBottom();
 }
-function bubbleTyping() {
-  const id = "typing-" + (crypto?.randomUUID?.() || Math.random().toString(36).slice(2));
-  chatEl.insertAdjacentHTML(
-    "beforeend",
-    `<div id="${id}" class="message bot-message">
-      <div class="message-content" aria-live="polite" aria-busy="true">
-        <span class="dot">•</span><span class="dot">•</span><span class="dot">•</span>
-      </div>
-    </div>`
-  );
-  return id;
-}
-function removeEl(id){ const el=document.getElementById(id); if(el) el.remove(); }
 
 // i18n 적용
 function setLang(next){
@@ -159,7 +176,9 @@ function setLang(next){
 
 // 환영/상태 렌더
 function renderWelcome(){
-  chatEl.innerHTML = "";
+  const messages = chatEl.querySelectorAll('.message');
+  messages.forEach(msg => msg.remove());
+  
   bubbleAI(I18N[LANG].welcome);
   bubbleStatus(I18N[LANG].statusIdle);
 }
@@ -171,7 +190,9 @@ function sendQuestion(q){
   bubbleUser(text);
   inputEl.value = "";
   sendBtn.disabled = true;
-  const typingId = bubbleTyping();
+  
+  // 타이핑 인디케이터 표시
+  showTyping();
 
   (async ()=>{
     try{
@@ -186,12 +207,17 @@ function sendQuestion(q){
       });
       clearTimeout(to);
 
-      if(!res.ok){ removeEl(typingId); return bubbleAI(`서버 오류(${res.status})`); }
+      // 타이핑 인디케이터 숨김
+      hideTyping();
+
+      if(!res.ok){ 
+        return bubbleAI(`서버 오류(${res.status})`); 
+      }
       const data = await res.json();
-      removeEl(typingId);
       bubbleAI(mdSafe(data.answer || "응답이 비었습니다."));
     }catch(err){
-      removeEl(typingId);
+      // 에러 시에도 타이핑 인디케이터 숨김
+      hideTyping();
       bubbleAI("요청 실패: " + (err?.message || err));
     }finally{
       sendBtn.disabled = false;

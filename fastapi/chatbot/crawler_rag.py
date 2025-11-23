@@ -117,7 +117,7 @@ def fetch_article(link: str) -> Dict[str, str]:
 
 # ===== 오늘만 수집 (KST 기준) =====
 # 날짜=오늘, 목록 페이징 순회, 중복/타일라인 필터, 최대 N건 저장
-def crawl_today(limit_per_run: int = 50):
+def crawl_today(limit_per_run: int = 10):
     col = get_collection()
     KST = ZoneInfo("Asia/Seoul")
     today_str = datetime.now(KST).strftime("%Y%m%d")

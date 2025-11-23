@@ -755,7 +755,7 @@ scheduler = BackgroundScheduler(timezone=KST)
 def _job_naver():
     try:
         log.info("네이버 뉴스 크롤링 시작...")
-        crawl_today(limit_per_run=50)
+        crawl_today(limit_per_run=10)
         log.info("네이버 뉴스 크롤링 완료")
     except Exception as e:
         log.exception(f"크롤링 실패: {e}")
@@ -769,6 +769,9 @@ async def lifespan(app: FastAPI):
         log.info("MongoDB 인덱스 생성 완료")
     except Exception as e:
         log.exception("인덱스 생성 실패")
+
+    # 즉시 첫 크롤링 실행
+    _job_naver()
 
     # 스케줄러 시작
     try:
@@ -1053,7 +1056,7 @@ def tts_google_post(payload: dict = Body(...)):
         return JSONResponse({"error": f"TTS 실패: {e}"}, status_code=500)
 
 # =========================
-# 유틸/헬스/스케줄러
+# 유틸/헬스체크 API
 # =========================
 
 # ===== 세션 리셋 =====
