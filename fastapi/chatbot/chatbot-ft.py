@@ -1,22 +1,18 @@
-# chatbot.py — GPT-4o-mini + RAG + Open API + MongoDB + Function Calling
+# chatbot.py — ft:GPT-4o-mini + RAG + Open API + MongoDB + Function Calling
 
 # 1) Chatbot 파트: OpenAI(Function Calling), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2) STT 파트: CLOVA STT + ffmpeg 전처리
 # 3) TTS 파트: Google Cloud Text-to-Speech
 
-# ===== 환경변수 로드 =====
-import os
-from dotenv import load_dotenv
-load_dotenv(override=True)
-
 # ===== 기본 임포트 =====
 # 표준/서드파티 라이브러리 로드 (FastAPI, OpenAI, MongoDB, APScheduler, GCP TTS, yfinance, pandas 등)
-import logging, subprocess, io, requests, tempfile, re, shutil, json
+import os, logging, subprocess, io, requests, tempfile, re, shutil, json
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +31,9 @@ from crawler_rag import crawl_today
 import yfinance as yf
 
 import pandas as pd
+
+# ===== 환경변수 로드 =====
+load_dotenv(override=True)
 
 # ===== 로깅 =====
 # 전역 로거 설정 (레벨/포맷)
@@ -79,7 +78,7 @@ SYSTEM_INSTRUCTIONS = """
 - TTS로 읽어야 하므로, 자연스러운 말투로 답하라.
 - 링크나 특수문자(괄호, 대괄호 등)는 절대 읽지 마라.
 - 날짜는 "10월 23일 오후 12시" 같은 자연스러운 한국어로 바꿔라.
-- 3~5개 뉴스만 요약하고, "더 궁금한 부분이 있으신가요?"로 마무리하라
+- 3~5개 뉴스만 요약하고, "더 궁금한 부분이 있으신가요?"로 마무리하라.
 
 도구 사용 정책:
 - 실시간 정보(뉴스, 주가지수/환율, 경제지표, 시세)는 반드시 지정된 도구(get_latest_news, get_market, get_indicator)를 직접 호출해 결과를 받아 출력하라.
@@ -733,7 +732,7 @@ def run_tool(tool_name: str, arguments: dict) -> dict:
         elif tool_name == "search_docs":
             q = arguments.get("query") or ""
             resp = client.responses.create(
-                model="gpt-4o-mini",
+                model="ft:gpt-4o-mini-2024-07-18:personal:yoo-chatbot1:Cf00a3qm",
                 instructions=SYSTEM_INSTRUCTIONS,
                 tools=[{"type": "file_search", "vector_store_ids": [VS_ID]}],
                 input=[{"role":"user","content":[{"type":"input_text","text":q}]}],
@@ -857,7 +856,7 @@ async def chat(payload: dict = Body(...)):
     try:
         # 1차 응답(도구 사용 여부 판단)
         comp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="ft:gpt-4o-mini-2024-07-18:personal:yoo-chatbot1:Cf00a3qm",
             messages=msgs,
             tools=TOOLS,
             tool_choice="auto",
@@ -874,7 +873,7 @@ async def chat(payload: dict = Body(...)):
                 tool_msgs.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
 
             final = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="ft:gpt-4o-mini-2024-07-18:personal:yoo-chatbot1:Cf00a3qm",
                 messages=msgs + [msg] + tool_msgs
             )
             answer = final.choices[0].message.content or "응답 생성 실패"
