@@ -1,17 +1,12 @@
-# chatbot.py — GPT-4o-mini + RAG + Open API + MongoDB + Function Calling
+# chatbot.py — LLaMA 3.2 7B + RAG + Open API + MongoDB + Langchain
 
-# 1) Chatbot 파트: OpenAI(Function Calling), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
+# 1) Chatbot 파트: LLaMA(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2) STT 파트: CLOVA STT + ffmpeg 전처리
 # 3) TTS 파트: Google Cloud Text-to-Speech
 
-# ===== 환경변수 로드 =====
-import os
-from dotenv import load_dotenv
-load_dotenv(override=True)
-
 # ===== 기본 임포트 =====
-# 표준/서드파티 라이브러리 로드 (FastAPI, OpenAI, MongoDB, APScheduler, GCP TTS, yfinance, pandas 등)
-import logging, subprocess, io, requests, tempfile, re, shutil, json
+# 표준/서드파티 라이브러리 로드 (FastAPI, Ollama, MongoDB, APScheduler, GCP TTS, yfinance, pandas 등)
+import os, logging, subprocess, io, requests, tempfile, re, shutil, json
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -22,19 +17,27 @@ from fastapi import FastAPI, UploadFile, File, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from contextlib import asynccontextmanager
-import httpx
+import httpx, html
 import asyncio
 
-from openai import OpenAI
 from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.cloud import texttospeech
 from google.oauth2 import service_account
-import html
-from crawler_rag import crawl_today
 import yfinance as yf
-
 import pandas as pd
+from crawler_rag import crawl_today
+
+# ===== LangChain import =====
+from langchain_community.llms import Ollama
+from langchain.agents import create_agent
+from langchain_ollama import OllamaLLM
+from langchain_community.tools import Tool
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.document_loaders import DirectoryLoader, UnstructuredWordDocumentLoader
 
 # ===== 로깅 =====
 # 전역 로거 설정 (레벨/포맷)
@@ -45,25 +48,8 @@ log = logging.getLogger("chatbot")
 # KST 타임존 상수
 KST = ZoneInfo("Asia/Seoul")
 
-# ===== OpenAI =====
-# OPENAI_API_KEY 환경변수 사용, 고정 UA 부여
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    default_headers={"User-Agent": "dgict-bot/1.0"}
-)
-
-# ===== OpenAI 모델 파인 튜닝 =====
-# file =OpenAI.File.create(file=open("training_data.jsonl", "rb"), purpose="fine-tune")
-# print(file.id)
-
-# job = OpenAI.FineTuningJob.create(
-#     training_file=file.id,
-#     model="gpt-4o-mini"
-# )
-# print(job.id)
-
 # =============================================================
-# CHATBOT (RAG + 뉴스 + 지표 + 시세 + Function Calling + 세션/라우트)
+# CHATBOT (RAG + 뉴스 + 지표 + 시세 + Lnagchain + 세션/라우트)
 # =============================================================
 
 # ===== 시스템 프롬프트 =====
@@ -88,99 +74,230 @@ SYSTEM_INSTRUCTIONS = """
 - 도구를 활용하지 않는 답변은 일반적인 개념 설명, 예시, 해설 질문(일반 GPT-4o-mini모델 답변)만 허용된다.
 """
 
-# ===== Function Calling 스키마 =====
-# 모델이 호출할 수 있는 함수 정의 (뉴스/지표/시세/RAG)
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_latest_news",
-            "description": "MongoDB에 저장된 최신 경제 뉴스 N건을 실시간으로 조회하여 제목과 발행일, 요약을 반환합니다. 항상 최신 뉴스는 이 함수로 조회하세요.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "count": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 20,
-                        "default": 5,
-                        "description": "조회할 최신 뉴스 개수 (1~20)"
-                    }
-                },
-                "required": ["count"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_indicator",
-            "description": "실시간 경제지표 조회 함수입니다. 지정된 indicator_type(CPI, PPI, GDP, BASE_RATE, TRADE_BALANCE, CURRENT_ACCOUNT, US_FEDFUNDS, US_FED_TARGET)에 대해 ECOS/FRED 등의 API에서 최신값 또는 최근 변동을 반환합니다. 경제지표 질문에는 반드시 이 함수를 사용하세요.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "indicator_type": {
-                        "type": "string",
-                        "enum": [
-                            "CPI", "PPI", "GDP", "BASE_RATE", "TRADE_BALANCE", "CURRENT_ACCOUNT",
-                            "US_FEDFUNDS", "US_FED_TARGET"
-                        ],
-                        "description": "조회할 경제지표 종류"
-                    }
-                },
-                "required": ["indicator_type"]
-            }
-        }
-    },
-    {
-      "type": "function",
-      "function": {
-        "name": "get_market",
-        "description": "실시간 주가/지수/환율/종목 시세를 조회합니다. market_type(예: KOSPI, USD_KRW, MARKETA_SUMMARY, QUOTE)을 지정하며, 개별 주식은 ticker(예: NVDA, ORCL, AAPL, 삼성전자 등) 값을 함께 입력하세요. 반드시 시세 질문에는 이 함수를 호출하세요.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "market_type": {
-              "type": "string",
-              "enum": [
-                "KOSPI",
-                "KOSDAQ",
-                "MARKET_SUMMARY",
-                "USD_KRW",
-                "JPY_KRW",
-                "EUR_USD",
-                "QUOTE"
-              ],
-              "description": "조회할 시장/시세 종류"
-            },
-            "ticker": {
-              "type": "string",
-              "description": "개별 종목 심볼 (예: NVDA, ORCL, AAPL, 005930.KS 등)"
-            }
-          },
-          "required": ["market_type"]
-        }
-      }
-    },
+# ===== 도구 함수 래퍼 정의 =====
+def get_latest_news_wrapper(count: str) -> dict:
+    """최신 뉴스 조회 래퍼"""
+    try:
+        n = int(count) if count else 5
+        n = max(1, min(20, n))  # 1~20 범위로 제한
+        rows = fetch_latest_topn_from_mongo(n)
+        return {"output": format_topn_md(rows)}
+    except Exception as e:
+        return {"error": f"뉴스 조회 실패: {str(e)}"}
 
-    {
-        "type": "function",
-        "function": {
-            "name": "search_docs",
-            "description": "웹서비스 사용법/기능/도움말 관련 질문은 검색엔진 기반 RAG에서 답변합니다. 파일 기반 문서 검색을 반드시 이 함수로 사용하세요.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "검색할 질문(키워드/문장)"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    }
+def get_indicator_wrapper(indicator_type: str) -> dict:
+    """경제지표 조회 래퍼"""
+    try:
+        t = indicator_type.upper().strip()
+        if t == "CPI":
+            return {"output": get_cpi_data()}
+        elif t == "PPI":
+            return {"output": get_ppi_data()}
+        elif t == "GDP":
+            return {"output": get_gdp_data()}
+        elif t == "BASE_RATE":
+            return {"output": get_base_rate()}
+        elif t == "TRADE_BALANCE":
+            return {"output": get_trade_balance()}
+        elif t == "CURRENT_ACCOUNT":
+            return {"output": get_current_account()}
+        elif t == "US_FEDFUNDS":
+            d = get_us_fed_funds_latest(False)
+            if "error" in d:
+                return {"error": "미국 실효 연방기금금리 조회 실패"}
+            return {"output": f"미국 실효 연방기금금리(FEDFUNDS)\n• 최신값: {d['value']:.2f}{d.get('unit','%')} (기준: {d['date']})"}
+        elif t == "US_FED_TARGET":
+            d = get_us_fed_funds_latest(True)
+            if "error" in d:
+                return {"error": "미국 연방기금금리 목표범위 조회 실패"}
+            rng = f"{d['lower']:.2f}–{d['upper']:.2f}{d.get('unit','%')}"
+            return {"output": f"미국 연방기금금리 목표범위\n• 범위: {rng} (기준: {d['date']})"}
+        else:
+            return {"error": f"지원하지 않는 지표입니다: {t}"}
+    except Exception as e:
+        return {"error": f"경제지표 조회 실패: {str(e)}"}
+
+def get_market_wrapper(input_str: str) -> dict:
+    """시장 데이터 조회 래퍼"""
+    try:
+        parts = input_str.split(',')
+        market_type = parts[0].strip().upper()
+        ticker = parts[1].strip() if len(parts) > 1 else None
+        
+        if market_type == "KOSPI":
+            return {"output": get_kospi_index()}
+        elif market_type == "KOSDAQ":
+            return {"output": get_kosdaq_index()}
+        elif market_type == "USD_KRW":
+            return {"output": get_usd_krw()}
+        elif market_type == "JPY_KRW":
+            return {"output": get_jpy_krw()}
+        elif market_type == "EUR_USD":
+            return {"output": get_eur_usd()}
+        elif market_type == "MARKET_SUMMARY":
+            return {"output": f"{get_market_indices()}\n\n{get_fx_rates()}"}
+        elif market_type == "QUOTE":
+            if not ticker:
+                return {"error": "QUOTE 조회에는 ticker가 필요합니다. 예: 'QUOTE,NVDA'"}
+            q = fetch_quote_yf(ticker)
+            if q.get("price") is not None:
+                ch, pct = q.get("change"), q.get("changePct")
+                sign = "+" if (ch or 0) >= 0 else ""
+                return {"output": (
+                    f"{ticker.upper()}\n"
+                    f"• 현재가: {q['price']:,.2f}\n"
+                    f"• 변동: {sign}{(ch or 0):.2f} ({sign}{(pct or 0):.2f}%)\n"
+                    f"• 기준시각: {q.get('ts_kst', '')}"
+                )}
+            else:
+                return {"error": f"{ticker.upper()} 시세 조회 실패"}
+        else:
+            return {"error": f"지원하지 않는 시장 타입: {market_type}"}
+    except Exception as e:
+        return {"error": f"시장 데이터 조회 실패: {str(e)}"}
+
+# ===== 벡터스토어 초기화 (앱 시작 시 1회) =====
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 한국어 지원
+)
+
+# 문서 로드 및 벡터스토어 생성 (최초 1회 또는 문서 업데이트 시)
+def create_vectorstore():
+    """문서를 벡터스토어로 변환"""
+    
+    # 문서 로드
+    loader = DirectoryLoader(
+        path="./docs",
+        glob="**/*.docx",
+        loader_cls=UnstructuredWordDocumentLoader
+    )
+    documents = loader.load()
+    
+    # 청크 분할
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
+    chunks = text_splitter.split_documents(documents)
+    
+    # 벡터스토어 생성 및 저장
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    vectorstore.save_local("./vectorstore")
+    return vectorstore
+
+# 벡터스토어 로드 (앱 시작 시)
+try:
+    vectorstore = FAISS.load_local("./vectorstore", embeddings, allow_dangerous_deserialization=True)
+except:
+    vectorstore = create_vectorstore()
+
+# ===== 검색 함수 =====
+def search_docs_wrapper(query: str) -> dict:
+    """직접 벡터 검색 구현"""
+    try:
+        # 1. 유사도 검색 (상위 3개)
+        docs = vectorstore.similarity_search(query, k=3)
+        
+        if not docs:
+            return {"error": f"'{query}'와 관련된 문서를 찾지 못했습니다."}
+        
+        # 2. 검색된 문서를 컨텍스트로 구성
+        context = "\n\n".join([f"문서 {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
+        
+        # 3. LLM에 질문 + 컨텍스트 전달
+        prompt = f"""다음 문서들을 참고하여 질문에 답변하세요:
+
+{context}
+
+질문: {query}
+
+답변:"""
+        
+        # Ollama로 답변 생성
+        response = llm.invoke(prompt)
+        
+        return {"output": response}
+        
+    except Exception as e:
+        log.exception("문서 검색 실패")
+        return {"error": f"문서 검색 중 오류 발생: {str(e)}"}
+
+# ===== LangChain 도구 정의 =====
+tools = [
+    Tool(
+        name="get_latest_news",
+        func=get_latest_news_wrapper,
+        description=(
+            "MongoDB에 저장된 최신 경제 뉴스를 조회합니다. "
+            "입력: 숫자 (1~20 사이의 뉴스 개수). 예: '5' 또는 '10'"
+        )
+    ),
+    Tool(
+        name="get_indicator",
+        func=get_indicator_wrapper,
+        description=(
+            "실시간 경제지표를 조회합니다. "
+            "입력: CPI, PPI, GDP, BASE_RATE, TRADE_BALANCE, CURRENT_ACCOUNT, US_FEDFUNDS, US_FED_TARGET 중 하나. "
+            "예: 'CPI' 또는 'GDP'"
+        )
+    ),
+    Tool(
+        name="get_market",
+        func=get_market_wrapper,
+        description=(
+            "실시간 주가/지수/환율을 조회합니다. "
+            "입력 형식: 'market_type' 또는 'market_type,ticker'. "
+            "market_type: KOSPI, KOSDAQ, USD_KRW, JPY_KRW, EUR_USD, MARKET_SUMMARY, QUOTE. "
+            "예: 'KOSPI' 또는 'QUOTE,NVDA' 또는 'QUOTE,005930.KS'"
+        )
+    ),
+    Tool(
+        name="search_docs",
+        func=search_docs_wrapper,
+        description=(
+            "웹서비스 사용법/기능/도움말 관련 문서를 검색합니다. "
+            "입력: 검색할 질문이나 키워드. 예: '차트 사용법'"
+        )
+    )
 ]
+
+# ===== Ollama LLM =====
+llm = OllamaLLM(
+    model="llama3.1",
+    base_url="http://localhost:11434"
+)
+
+# ===== Agent 초기화 =====
+agent = create_agent(
+    llm,
+    tools,
+    system_prompt=SYSTEM_INSTRUCTIONS
+)
+
+# ===== LangChain Agent 채팅 함수 =====
+def chat_with_agent(user_message: str, session_id: str = "default") -> str:
+    """LangChain Agent를 통한 채팅"""
+    try:
+        # 세션 히스토리 가져오기
+        history = get_session(session_id)
+        
+        # 과거 턴 + 시스템 프롬프트 + 현재 메시지 → messages 리스트 구성
+        messages = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
+        for turn in history[-10:]:  # 최근 10턴만 사용
+            messages.append({"role": turn['role'], "content": turn['content']})
+        messages.append({"role": "user", "content": user_message})
+
+        # Agent function calling 실행: messages dict로 직접 넘김!
+        response = agent.invoke({"messages": messages})
+        
+        # 세션 저장
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", response)
+        
+        return response
+    except Exception as e:
+        log.exception("Agent 실행 실패")
+        return f"죄송합니다. 오류가 발생했습니다: {str(e)}"
 
 # ===== RAG 벡터스토어 ID =====
 # ENV 우선, 없으면 .vector_store_id 파일에서 로드
@@ -732,14 +849,7 @@ def run_tool(tool_name: str, arguments: dict) -> dict:
 
         elif tool_name == "search_docs":
             q = arguments.get("query") or ""
-            resp = client.responses.create(
-                model="gpt-4o-mini",
-                instructions=SYSTEM_INSTRUCTIONS,
-                tools=[{"type": "file_search", "vector_store_ids": [VS_ID]}],
-                input=[{"role":"user","content":[{"type":"input_text","text":q}]}],
-            )
-            ans = (getattr(resp, "output_text", "") or "").strip() or "문서에서 답을 찾지 못했습니다."
-            return {"ok": True, "markdown": ans}
+            return {"ok": True, "markdown": search_docs_wrapper(q)}
 
         return {"ok": False, "error": f"Unknown tool: {tool_name}"}
     except Exception as e:
@@ -829,7 +939,7 @@ app.add_middleware(
 )
 
 # ===== 메인 챗 엔드포인트 =====
-# 사용자 메시지 → OpenAI → (필요시) 함수 호출 → 최종 답변
+# 사용자 메시지 → LLaMA → (필요시) 함수 호출 → 최종 답변
 @app.post("/api/chat")
 @app.post("/chat")
 async def chat(payload: dict = Body(...)):
@@ -848,42 +958,19 @@ async def chat(payload: dict = Body(...)):
         except Exception:
             return {"answer": "DB 조회 오류. 잠시 후 다시 시도해 주세요."}
 
-    # 세션 히스토리 구성
+    # 세션 히스토리 구성 및 LangChain 메시지 구조화
     msgs = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
     for t in get_session(session_id):
         msgs.append({"role": t["role"], "content": t["content"]})
     msgs.append({"role": "user", "content": user_msg})
 
     try:
-        # 1차 응답(도구 사용 여부 판단)
-        comp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=msgs,
-            tools=TOOLS,
-            tool_choice="auto",
-        )
-        msg = comp.choices[0].message
-
-        # 도구 호출 시: 실행 결과를 재주입해 최종 응답 생성
-        if getattr(msg, "tool_calls", None):
-            tool_msgs = []
-            for tc in msg.tool_calls:
-                fn = tc.function.name
-                args = json.loads(tc.function.arguments or "{}")
-                result = run_tool(fn, args)
-                tool_msgs.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result, ensure_ascii=False)})
-
-            final = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=msgs + [msg] + tool_msgs
-            )
-            answer = final.choices[0].message.content or "응답 생성 실패"
-        else:
-            answer = msg.content or "응답 생성 실패"
-
+        # LangChain Agent function calling 입력 구조로 직접 실행
+        agent_answer = agent.invoke({"messages": msgs})
+        # 세션 저장 (원래대로 유지)
         add_turn(session_id, "user", user_msg)
-        add_turn(session_id, "assistant", answer)
-        return {"answer": answer, "session_id": session_id}
+        add_turn(session_id, "assistant", agent_answer)
+        return {"answer": agent_answer, "session_id": session_id}
     except Exception as e:
         log.exception("chat failed")
         return {"answer": "일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요."}
