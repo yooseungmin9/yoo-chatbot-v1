@@ -1,10 +1,10 @@
 // ========== 0) 기본 설정 ==========
-const APP_NAME  = "AI 경제질문 챗봇";
+const APP_NAME = "AI 경제질문 챗봇";
 const APP_NAME_US = "AI Economy Q&A Chatbot";
-const CHAT_URL  = "/api/chat";
+const CHAT_URL = "/api/chat";
 const RESET_URL = "/api/reset";
-const STT_URL   = "/api/stt";
-const TTS_URL   = "/api/tts";
+const STT_URL = "/api/stt";
+const TTS_URL = "/api/tts";
 const TIMEOUT_MS = 180000;
 
 // i18n
@@ -46,21 +46,21 @@ const I18N = {
 };
 
 // ========== 1) DOM ==========
-const titleEl     = document.getElementById("appTitle");
-const headingEl   = document.getElementById("pageHeading");
+const titleEl = document.getElementById("appTitle");
+const headingEl = document.getElementById("pageHeading");
 const labelLangEl = document.getElementById("labelLang");
-const langSelect  = document.getElementById("langSelect");
+const langSelect = document.getElementById("langSelect");
 
-const chatEl      = document.getElementById("chat");
-const formEl      = document.getElementById("chatForm");
-const inputEl     = document.getElementById("messageInput");
-const sendBtn     = document.getElementById("sendBtn");
-const resetBtn    = document.getElementById("resetBtn");
+const chatEl = document.getElementById("chat");
+const formEl = document.getElementById("chatForm");
+const inputEl = document.getElementById("messageInput");
+const sendBtn = document.getElementById("sendBtn");
+const resetBtn = document.getElementById("resetBtn");
 
 const sttStartBtn = document.getElementById("sttStartBtn");
-const sttStopBtn  = document.getElementById("sttStopBtn");
-const ttsBtn      = document.getElementById("ttsBtn");
-const ttsAudio    = document.getElementById("ttsAudio");
+const sttStopBtn = document.getElementById("sttStopBtn");
+const ttsBtn = document.getElementById("ttsBtn");
+const ttsAudio = document.getElementById("ttsAudio");
 
 const typingIndicator = document.getElementById("typingIndicator");
 
@@ -78,12 +78,12 @@ function initTheme() {
 
 function applyTheme(theme, animate = true) {
   const htmlEl = document.documentElement;
-  
+
   // 애니메이션 제어
   if (!animate) {
     htmlEl.classList.add("no-transition");
   }
-  
+
   if (theme === "dark") {
     htmlEl.setAttribute("data-theme", "dark");
     if (themeIcon) themeIcon.textContent = "☀️";
@@ -91,9 +91,9 @@ function applyTheme(theme, animate = true) {
     htmlEl.removeAttribute("data-theme");
     if (themeIcon) themeIcon.textContent = "🌙";
   }
-  
+
   localStorage.setItem("chat_theme", theme);
-  
+
   // 애니메이션 복원
   if (!animate) {
     setTimeout(() => htmlEl.classList.remove("no-transition"), 50);
@@ -111,9 +111,9 @@ function toggleTheme() {
 themeToggleBtn?.addEventListener("click", toggleTheme);
 
 // ========== 2) 도우미 ==========
-const escapeHtml = (s)=>String(s||"").replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
-const mdSafe = (text)=> escapeHtml(text).replace(/^-\s/gm,"• ").replace(/\n/g,"<br>");
-const scrollToBottom = ()=>{ chatEl.scrollTop = chatEl.scrollHeight; };
+const escapeHtml = (s) => String(s || "").replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m]));
+const mdSafe = (text) => escapeHtml(text).replace(/^-\s/gm, "• ").replace(/\n/g, "<br>");
+const scrollToBottom = () => { chatEl.scrollTop = chatEl.scrollHeight; };
 
 // 타이핑 인디케이터 표시 (말풍선 형태로 생성)
 function showTyping() {
@@ -141,26 +141,26 @@ function hideTyping() {
 }
 
 // 메시지 버블 함수들
-function bubbleUser(text){
+function bubbleUser(text) {
   chatEl.insertAdjacentHTML("beforeend",
     `<div class="message user-message"><div class="message-content">${escapeHtml(text)}</div></div>`);
   scrollToBottom();
 }
 
-function bubbleAI(html){
+function bubbleAI(html) {
   chatEl.insertAdjacentHTML("beforeend",
-    `<div class="message bot-message"><div class="message-content" data-tts="${escapeHtml(html).replace(/<[^>]+>/g,'')}">${html}</div></div>`);
+    `<div class="message bot-message"><div class="message-content" data-tts="${escapeHtml(html).replace(/<[^>]+>/g, '')}">${html}</div></div>`);
   scrollToBottom();
 }
 
-function bubbleStatus(text){
+function bubbleStatus(text) {
   chatEl.insertAdjacentHTML("beforeend",
     `<div class="message bot-message"><div class="message-content" style="opacity: 0.6; font-size: 0.9em;">${escapeHtml(text)}</div></div>`);
   scrollToBottom();
 }
 
 // i18n 적용
-function setLang(next){
+function setLang(next) {
   LANG = (next === "en-US" ? "en-US" : "ko-KR");
   localStorage.setItem("chat_lang", LANG);
   if (langSelect && langSelect.value !== LANG) langSelect.value = LANG;
@@ -169,39 +169,39 @@ function setLang(next){
   headingEl && (headingEl.textContent = I18N[LANG].pageHeading);
   labelLangEl && (labelLangEl.textContent = I18N[LANG].labelLang);
   resetBtn && (resetBtn.textContent = I18N[LANG].btnReset);
-  sendBtn  && (sendBtn.textContent  = I18N[LANG].btnSend);
-  ttsBtn   && (ttsBtn.textContent   = I18N[LANG].btnTts);
-  inputEl  && (inputEl.placeholder  = I18N[LANG].inputPh);
+  sendBtn && (sendBtn.textContent = I18N[LANG].btnSend);
+  ttsBtn && (ttsBtn.textContent = I18N[LANG].btnTts);
+  inputEl && (inputEl.placeholder = I18N[LANG].inputPh);
 }
 
 // 환영/상태 렌더
-function renderWelcome(){
+function renderWelcome() {
   const messages = chatEl.querySelectorAll('.message');
   messages.forEach(msg => msg.remove());
-  
+
   bubbleAI(I18N[LANG].welcome);
   bubbleStatus(I18N[LANG].statusIdle);
 }
 
 // ========== 3) FAQ 즉시 전송 ==========
-function sendQuestion(q){
+function sendQuestion(q) {
   const text = (q || "").trim();
-  if(!text) return;
+  if (!text) return;
   bubbleUser(text);
   inputEl.value = "";
   sendBtn.disabled = true;
-  
+
   // 타이핑 인디케이터 표시
   showTyping();
 
-  (async ()=>{
-    try{
+  (async () => {
+    try {
       const ctrl = new AbortController();
-      const to = setTimeout(()=>ctrl.abort("timeout"), TIMEOUT_MS);
+      const to = setTimeout(() => ctrl.abort("timeout"), TIMEOUT_MS);
 
       const res = await fetch(CHAT_URL, {
-        method:"POST",
-        headers: {"Content-Type":"application/json"},
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, lang: LANG }),
         signal: ctrl.signal
       });
@@ -210,24 +210,32 @@ function sendQuestion(q){
       // 타이핑 인디케이터 숨김
       hideTyping();
 
-      if(!res.ok){ 
-        return bubbleAI(`서버 오류(${res.status})`); 
+      if (!res.ok) {
+        return bubbleAI(`서버 오류(${res.status})`);
       }
       const data = await res.json();
-      bubbleAI(mdSafe(data.answer || "응답이 비었습니다."));
-    }catch(err){
+
+      let answer = data.answer;
+      if (typeof answer === "object") {
+        answer = JSON.stringify(answer);
+      }
+
+      bubbleAI(mdSafe(answer || "응답이 비었습니다."));
+
+    } catch (err) {
       // 에러 시에도 타이핑 인디케이터 숨김
       hideTyping();
       bubbleAI("요청 실패: " + (err?.message || err));
-    }finally{
+
+    } finally {
       sendBtn.disabled = false;
     }
   })();
 }
 
-function bindFAQ(){
-  document.querySelectorAll(".faq-item").forEach(btn=>{
-    btn.addEventListener("click", ()=>{
+function bindFAQ() {
+  document.querySelectorAll(".faq-item").forEach(btn => {
+    btn.addEventListener("click", () => {
       const q = btn.getAttribute("data-question") || btn.textContent || "";
       sendQuestion(q);
     });
@@ -241,7 +249,7 @@ renderWelcome();
 bindFAQ();
 
 // ========== 5) 이벤트 ==========
-langSelect?.addEventListener("change", ()=>{
+langSelect?.addEventListener("change", () => {
   setLang(langSelect.value);
   renderWelcome();
 });
@@ -254,23 +262,23 @@ inputEl.addEventListener("keydown", function (e) {
   }
 });
 
-formEl?.addEventListener("submit", (e)=>{
+formEl?.addEventListener("submit", (e) => {
   e.preventDefault();
   const q = inputEl.value.trim();
-  if(!q) return;
+  if (!q) return;
   sendQuestion(q);
 });
 
-resetBtn?.addEventListener("click", async ()=>{
+resetBtn?.addEventListener("click", async () => {
   resetBtn.disabled = true;
-  try{
-    await fetch(RESET_URL, { method:"POST" });
+  try {
+    await fetch(RESET_URL, { method: "POST" });
     localStorage.removeItem("chat_messages");
     renderWelcome();
     bubbleStatus(I18N[LANG].cleared);
-  }catch{
+  } catch {
     bubbleAI("초기화 요청 실패.");
-  }finally{
+  } finally {
     resetBtn.disabled = false;
   }
 });
@@ -281,11 +289,11 @@ let recogRunning = false;
 let baseBeforeRec = "";
 let finalSoFar = "";
 
-function isSpeechAPIAvailable(){
+function isSpeechAPIAvailable() {
   return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
 
-function makeRecognition(){
+function makeRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const r = new SR();
   r.lang = LANG;
@@ -294,7 +302,7 @@ function makeRecognition(){
   return r;
 }
 
-async function startSTT(){
+async function startSTT() {
   if (recogRunning) return;
 
   if (!isSpeechAPIAvailable()) {
@@ -314,14 +322,14 @@ async function startSTT(){
   baseBeforeRec = inputEl.value;
   finalSoFar = "";
 
-  recognition.onstart = ()=>{
+  recognition.onstart = () => {
     recogRunning = true;
     sttStartBtn.disabled = true;
-    sttStopBtn.disabled  = false;
+    sttStopBtn.disabled = false;
     bubbleStatus(I18N[LANG].sttStart);
   };
 
-  recognition.onresult = (e)=>{
+  recognition.onresult = (e) => {
     let interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const res = e.results[i];
@@ -333,17 +341,17 @@ async function startSTT(){
     }
     const composed = (baseBeforeRec ? baseBeforeRec + " " : "") + (finalSoFar + interim).trim();
     inputEl.value = composed;
-    try { inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length); } catch {}
+    try { inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length); } catch { }
   };
 
-  recognition.onerror = (e)=>{
+  recognition.onerror = (e) => {
     bubbleAI('음성 인식 오류: ' + (e.error || 'unknown'));
   };
 
-  recognition.onend = ()=>{
+  recognition.onend = () => {
     recogRunning = false;
     sttStartBtn.disabled = false;
-    sttStopBtn.disabled  = true;
+    sttStopBtn.disabled = true;
     bubbleStatus(I18N[LANG].sttDone);
     recognition = null;
   };
@@ -353,12 +361,12 @@ async function startSTT(){
   } catch (err) {
     recogRunning = false;
     sttStartBtn.disabled = false;
-    sttStopBtn.disabled  = true;
+    sttStopBtn.disabled = true;
     bubbleAI('음성 인식 시작 실패: ' + (err?.message || err));
   }
 }
 
-function stopSTT(){
+function stopSTT() {
   try {
     if (recognition && recogRunning) {
       recognition.stop();
@@ -372,35 +380,35 @@ sttStartBtn?.addEventListener('click', startSTT);
 sttStopBtn?.addEventListener('click', stopSTT);
 
 // ========== 7) TTS: 버튼/말풍선 ==========
-ttsBtn?.addEventListener("click", async ()=>{
+ttsBtn?.addEventListener("click", async () => {
   const last = [...document.querySelectorAll(".bot-message .message-content")].pop();
   if (!last) return;
   const text = last.getAttribute("data-tts") || last.innerText || "";
   if (!text.trim()) return;
-  try{
+  try {
     const res = await fetch(TTS_URL, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: text.slice(0,2000), lang: LANG,
+        text: text.slice(0, 2000), lang: LANG,
         voice: LANG.startsWith("ko") ? "ko-KR-Neural2-B" : "en-US-Neural2-C",
         fmt: "MP3", rate: 1.0, pitch: 0.0
       })
     });
-    const ct = (res.headers.get("content-type")||"").toLowerCase();
-    if(res.ok && ct.includes("audio")){
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (res.ok && ct.includes("audio")) {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      if (ttsAudio){ ttsAudio.src = url; await ttsAudio.play(); }
+      if (ttsAudio) { ttsAudio.src = url; await ttsAudio.play(); }
       else { new Audio(url).play(); }
     } else {
-      const txt = await res.text().catch(()=> "");
+      const txt = await res.text().catch(() => "");
       bubbleAI("TTS 오류: " + (txt || `HTTP ${res.status}`));
     }
-  }catch(err){ bubbleAI("TTS 호출 실패: " + (err?.message || err)); }
+  } catch (err) { bubbleAI("TTS 호출 실패: " + (err?.message || err)); }
 });
 
-chatEl.addEventListener("click", async (e)=>{
+chatEl.addEventListener("click", async (e) => {
   const msg = e.target.closest(".bot-message .message-content");
   if (!msg) return;
   const text = msg.getAttribute("data-tts") || msg.innerText || msg.textContent || "";
@@ -420,13 +428,13 @@ chatEl.addEventListener("click", async (e)=>{
       })
     });
     const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if(res.ok && ct.includes("audio")){
+    if (res.ok && ct.includes("audio")) {
       const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
       if (ttsAudio) { ttsAudio.src = url; await ttsAudio.play(); }
       else { new Audio(url).play(); }
     } else {
-      const txt = await res.text().catch(()=> "");
+      const txt = await res.text().catch(() => "");
       bubbleAI("TTS 오류: " + (txt || `HTTP ${res.status}`));
     }
   } catch (err) {

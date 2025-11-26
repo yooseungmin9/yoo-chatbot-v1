@@ -31,7 +31,7 @@ from crawler_rag import crawl_today
 # ===== LangChain import =====
 from langchain_community.llms import Ollama
 from langchain.agents import create_agent
-from langchain_ollama import OllamaLLM
+from langchain_ollama import ChatOllama
 from langchain_community.tools import Tool
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
@@ -215,9 +215,17 @@ def search_docs_wrapper(query: str) -> dict:
         
         # Ollama로 답변 생성
         response = llm.invoke(prompt)
+
+        if hasattr(response, "content"):
+            response_text = response.content
+        elif isinstance(response, str):
+            response_text = response
+        else:
+            import json
+            response_text = json.dumps(response)
         
-        return {"output": response}
-        
+        return {"output": response_text}
+
     except Exception as e:
         log.exception("문서 검색 실패")
         return {"error": f"문서 검색 중 오류 발생: {str(e)}"}
@@ -262,7 +270,7 @@ tools = [
 ]
 
 # ===== Ollama LLM =====
-llm = OllamaLLM(
+llm = ChatOllama(
     model="llama3.1",
     base_url="http://localhost:11434"
 )
