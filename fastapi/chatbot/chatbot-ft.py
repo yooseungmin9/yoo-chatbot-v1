@@ -4,6 +4,11 @@
 # 2) STT 파트: CLOVA STT + ffmpeg 전처리
 # 3) TTS 파트: Google Cloud Text-to-Speech
 
+# ===== 환경변수 로드 =====
+import os
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 # ===== 기본 임포트 =====
 # 표준/서드파티 라이브러리 로드 (FastAPI, OpenAI, MongoDB, APScheduler, GCP TTS, yfinance, pandas 등)
 import os, logging, subprocess, io, requests, tempfile, re, shutil, json
@@ -29,11 +34,7 @@ from google.oauth2 import service_account
 import html
 from crawler_rag import crawl_today
 import yfinance as yf
-
 import pandas as pd
-
-# ===== 환경변수 로드 =====
-load_dotenv(override=True)
 
 # ===== 로깅 =====
 # 전역 로거 설정 (레벨/포맷)

@@ -1,8 +1,13 @@
 # chatbot.py — LLaMA 3.2 7B + RAG + Open API + MongoDB + Langchain
 
-# 1) Chatbot 파트: LLaMA(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
+# 1) Chatbot 파트: Ollama(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2) STT 파트: CLOVA STT + ffmpeg 전처리
 # 3) TTS 파트: Google Cloud Text-to-Speech
+
+# ===== 환경변수 로드 =====
+import os
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
 # ===== 기본 임포트 =====
 # 표준/서드파티 라이브러리 로드 (FastAPI, Ollama, MongoDB, APScheduler, GCP TTS, yfinance, pandas 등)
@@ -24,9 +29,10 @@ from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.cloud import texttospeech
 from google.oauth2 import service_account
+from crawler_rag import crawl_today
+from pydantic import BaseModel, Field
 import yfinance as yf
 import pandas as pd
-from crawler_rag import crawl_today
 
 # ===== LangChain import =====
 from langchain_community.llms import Ollama
@@ -38,6 +44,7 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, UnstructuredWordDocumentLoader
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 # ===== 로깅 =====
 # 전역 로거 설정 (레벨/포맷)
@@ -55,31 +62,38 @@ KST = ZoneInfo("Asia/Seoul")
 # ===== 시스템 프롬프트 =====
 # 답변 톤/형식, 도구 사용 원칙 요약
 SYSTEM_INSTRUCTIONS = """
-너는 'AI 기반 경제 뉴스 분석 웹서비스'의 안내 챗봇이다. 사용자는 '바로 결과'를 원한다.
-- 결론부터 3~6문장 또는 불릿으로 간결히 답하라.
-- 가능하면 '제목(링크) · 발행일(KST) · 한줄 요약' 구조를 쓴다.
-- 어려운 용어는 괄호로 짧게 보충한다. (예: 리프라이싱=재가격조정)
-- 에러/빈결과는 한 줄로 원인 + 1가지 대안만 제시한다.
+당신은 경제 뉴스 분석 웹서비스의 AI 챗봇입니다.
 
-답변 형식:
-- TTS로 읽어야 하므로, 자연스러운 말투로 답하라.
-- 링크나 특수문자(괄호, 대괄호 등)는 절대 읽지 마라.
-- 날짜는 "10월 23일 오후 12시" 같은 자연스러운 한국어로 바꿔라.
-- 3~5개 뉴스만 요약하고, "더 궁금한 부분이 있으신가요?"로 마무리하라
+[답변 원칙]
+1. 결론부터 3~5문장으로 간결하게 답하세요
+2. 어려운 용어는 괄호로 설명하세요 (예: 리프라이싱=재가격조정)
+3. TTS 음성 출력용이므로 자연스러운 말투를 사용하세요
+4. 날짜는 "10월 23일 오후 12시" 형식으로 표현하세요
+5. 마무리는 "더 궁금한 부분이 있으신가요?"로 끝내세요
 
-도구 사용 정책:
-- 실시간 정보(뉴스, 주가지수/환율, 경제지표, 시세)는 반드시 지정된 도구(get_latest_news, get_market, get_indicator)를 직접 호출해 결과를 받아 출력하라.
-- 모든 주가/환율/지표 질문에는 get_market 또는 get_indicator 함수 호출을 최우선으로 적용하고, 만약 도구 결과가 없을 때만 “확인할 수 없음” 답변을 생성하라.
-- 웹서비스 기능/도움말 질문에는 search_docs 도구를 적용하라.
-- 도구를 활용하지 않는 답변은 일반적인 개념 설명, 예시, 해설 질문(일반 GPT-4o-mini모델 답변)만 허용된다.
+[도구 사용 규칙]
+아래 3가지 상황에만 도구를 호출하세요:
+
+상황 1: 인사/일반 대화 → 도구 호출 금지
+- 입력 예시: "안녕하세요", "뭐하는 서비스야", "경제 공부 어떻게 해?"
+- 답변 예시: "안녕하세요! 저는 경제 뉴스와 실시간 경제 지표, 주가 정보를 제공하며, 경제 용어 설명으로 경제 학습을 도와드립니다. 무엇이 궁금하신가요?"
+
+상황 2: 뉴스/시세/지표 요청 → 해당 도구 호출
+- "최신 뉴스" → get_latest_news() 호출
+- "코스피", "달러 환율" → get_market() 호출  
+- "GDP", "금리" → get_indicator() 호출
+
+상황 3: 서비스 기능 질문 → search_docs() 호출
+- "이 사이트 사용법", "무슨 기능 있어?" → search_docs() 호출
+
+[중요] 상황 1(인사/일반 대화)에서는 절대 도구를 호출하지 마세요.
 """
 
 # ===== 도구 함수 래퍼 정의 =====
-def get_latest_news_wrapper(count: str) -> dict:
+def get_latest_news_wrapper(count: int) -> dict:
     """최신 뉴스 조회 래퍼"""
     try:
-        n = int(count) if count else 5
-        n = max(1, min(20, n))  # 1~20 범위로 제한
+        n = max(1, min(20, count))  # count를 n으로 변환
         rows = fetch_latest_topn_from_mongo(n)
         return {"output": format_topn_md(rows)}
     except Exception as e:
@@ -117,12 +131,11 @@ def get_indicator_wrapper(indicator_type: str) -> dict:
     except Exception as e:
         return {"error": f"경제지표 조회 실패: {str(e)}"}
 
-def get_market_wrapper(input_str: str) -> dict:
+def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
     """시장 데이터 조회 래퍼"""
     try:
-        parts = input_str.split(',')
-        market_type = parts[0].strip().upper()
-        ticker = parts[1].strip() if len(parts) > 1 else None
+        market_type = market_type.strip().upper()
+        ticker = ticker.strip()
         
         if market_type == "KOSPI":
             return {"output": get_kospi_index()}
@@ -138,7 +151,7 @@ def get_market_wrapper(input_str: str) -> dict:
             return {"output": f"{get_market_indices()}\n\n{get_fx_rates()}"}
         elif market_type == "QUOTE":
             if not ticker:
-                return {"error": "QUOTE 조회에는 ticker가 필요합니다. 예: 'QUOTE,NVDA'"}
+                return {"error": "QUOTE 조회에는 ticker가 필요합니다. 예: market_type='QUOTE', ticker='NVDA'"}
             q = fetch_quote_yf(ticker)
             if q.get("price") is not None:
                 ch, pct = q.get("change"), q.get("changePct")
@@ -193,79 +206,54 @@ except:
 
 # ===== 검색 함수 =====
 def search_docs_wrapper(query: str) -> dict:
-    """직접 벡터 검색 구현"""
-    try:
-        # 1. 유사도 검색 (상위 3개)
-        docs = vectorstore.similarity_search(query, k=3)
-        
-        if not docs:
-            return {"error": f"'{query}'와 관련된 문서를 찾지 못했습니다."}
-        
-        # 2. 검색된 문서를 컨텍스트로 구성
-        context = "\n\n".join([f"문서 {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
-        
-        # 3. LLM에 질문 + 컨텍스트 전달
-        prompt = f"""다음 문서들을 참고하여 질문에 답변하세요:
+    """벡터스토어 문서 검색 래퍼"""
+    docs = vectorstore.similarity_search(query, k=3)
+    if not docs:
+        return {"output": "관련 문서를 찾지 못했습니다."}
+    
+    # LLM 호출 없이 문서 내용만 반환
+    context = "\n\n".join([f"• {doc.page_content[:200]}" for doc in docs])
+    return {"output": f"검색 결과:\n{context}"}
+      
+# ===== 도구 입력 스키마 정의 =====
+class NewsInput(BaseModel):
+    count: int = Field(default=5, description="조회할 뉴스 개수 (1~20)")
 
-{context}
+class IndicatorInput(BaseModel):
+    indicator_type: str = Field(..., description="CPI, GDP, BASE_RATE 등")
 
-질문: {query}
+class MarketInput(BaseModel):
+    market_type: str = Field(..., description="KOSPI, USD_KRW, QUOTE 등")
+    ticker: str = Field(default="", description="QUOTE 요청 시 종목 티커")
 
-답변:"""
-        
-        # Ollama로 답변 생성
-        response = llm.invoke(prompt)
-
-        if hasattr(response, "content"):
-            response_text = response.content
-        elif isinstance(response, str):
-            response_text = response
-        else:
-            import json
-            response_text = json.dumps(response)
-        
-        return {"output": response_text}
-
-    except Exception as e:
-        log.exception("문서 검색 실패")
-        return {"error": f"문서 검색 중 오류 발생: {str(e)}"}
+class DocsInput(BaseModel):
+    query: str = Field(..., description="검색할 키워드 또는 질문")
 
 # ===== LangChain 도구 정의 =====
 tools = [
     Tool(
         name="get_latest_news",
         func=get_latest_news_wrapper,
-        description=(
-            "MongoDB에 저장된 최신 경제 뉴스를 조회합니다. "
-            "입력: 숫자 (1~20 사이의 뉴스 개수). 예: '5' 또는 '10'"
-        )
+        description="최신 경제 뉴스 조회",
+        args_schema=NewsInput
     ),
     Tool(
         name="get_indicator",
-        func=get_indicator_wrapper,
-        description=(
-            "실시간 경제지표를 조회합니다. "
-            "입력: CPI, PPI, GDP, BASE_RATE, TRADE_BALANCE, CURRENT_ACCOUNT, US_FEDFUNDS, US_FED_TARGET 중 하나. "
-            "예: 'CPI' 또는 'GDP'"
-        )
+        func=lambda indicator_type: get_indicator_wrapper(indicator_type),
+        description="실시간 경제지표 조회",
+        args_schema=IndicatorInput
     ),
     Tool(
         name="get_market",
-        func=get_market_wrapper,
-        description=(
-            "실시간 주가/지수/환율을 조회합니다. "
-            "입력 형식: 'market_type' 또는 'market_type,ticker'. "
-            "market_type: KOSPI, KOSDAQ, USD_KRW, JPY_KRW, EUR_USD, MARKET_SUMMARY, QUOTE. "
-            "예: 'KOSPI' 또는 'QUOTE,NVDA' 또는 'QUOTE,005930.KS'"
-        )
+        func=lambda market_type, ticker="": get_market_wrapper(market_type, ticker),
+        description="실시간 주가/지수/환율 조회",
+        args_schema=MarketInput
     ),
     Tool(
         name="search_docs",
-        func=search_docs_wrapper,
-        description=(
-            "웹서비스 사용법/기능/도움말 관련 문서를 검색합니다. "
-            "입력: 검색할 질문이나 키워드. 예: '차트 사용법'"
-        )
+        func=lambda query: search_docs_wrapper(query),
+        description="웹서비스 사용법/기능/도움말 관련 문서 검색",
+        args_schema=DocsInput
     )
 ]
 
@@ -283,8 +271,16 @@ agent = create_agent(
 )
 
 # ===== LangChain Agent 채팅 함수 =====
+GREETING_KEYWORDS = ["안녕", "hello", "hi", "반가", "처음", "감사", "반갑", "초보"]
+
 def chat_with_agent(user_message: str, session_id: str = "default") -> str:
     """LangChain Agent를 통한 채팅"""
+    # 인사 감지 시 즉시 반환
+    if any(kw in user_message.lower() for kw in GREETING_KEYWORDS):
+        greeting_response = "안녕하세요! 저는 경제 뉴스와 실시간 경제 지표, 주가 정보를 제공하며, 경제 용어 설명으로 경제 학습을 도와드립니다. 무엇이 궁금하신가요?"
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", greeting_response)
+        return greeting_response
     try:
         # 세션 히스토리 가져오기
         history = get_session(session_id)
@@ -297,12 +293,25 @@ def chat_with_agent(user_message: str, session_id: str = "default") -> str:
 
         # Agent function calling 실행: messages dict로 직접 넘김!
         response = agent.invoke({"messages": messages})
-        
-        # 세션 저장
+
+        # 응답 처리
+        if hasattr(response, "content"):
+            agent_answer = response.content
+        elif isinstance(response, dict) and "messages" in response:
+            msgs = response.get("messages", [])
+            if msgs:
+                agent_answer = msgs[-1].content if hasattr(msgs[-1], "content") else str(msgs[-1])
+            else:
+                agent_answer = str(response)
+        else:
+            agent_answer = str(response)
+
+        # 세션 저장 (user + assistant 둘 다)
         add_turn(session_id, "user", user_message)
-        add_turn(session_id, "assistant", response)
-        
-        return response
+        add_turn(session_id, "assistant", agent_answer)
+
+        return agent_answer
+    
     except Exception as e:
         log.exception("Agent 실행 실패")
         return f"죄송합니다. 오류가 발생했습니다: {str(e)}"
@@ -947,7 +956,7 @@ app.add_middleware(
 )
 
 # ===== 메인 챗 엔드포인트 =====
-# 사용자 메시지 → LLaMA → (필요시) 함수 호출 → 최종 답변
+# 사용자 메시지 → Ollama → (필요시) 함수 호출 → 최종 답변
 @app.post("/api/chat")
 @app.post("/chat")
 async def chat(payload: dict = Body(...)):
@@ -973,11 +982,7 @@ async def chat(payload: dict = Body(...)):
     msgs.append({"role": "user", "content": user_msg})
 
     try:
-        # LangChain Agent function calling 입력 구조로 직접 실행
-        agent_answer = agent.invoke({"messages": msgs})
-        # 세션 저장 (원래대로 유지)
-        add_turn(session_id, "user", user_msg)
-        add_turn(session_id, "assistant", agent_answer)
+        agent_answer = chat_with_agent(user_msg, session_id)
         return {"answer": agent_answer, "session_id": session_id}
     except Exception as e:
         log.exception("chat failed")
