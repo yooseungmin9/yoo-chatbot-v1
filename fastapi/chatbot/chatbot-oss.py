@@ -23,7 +23,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from contextlib import asynccontextmanager
 import httpx, html
-import asyncio
 
 from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -44,7 +43,7 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, UnstructuredWordDocumentLoader
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 
 # ===== 로깅 =====
 # 전역 로거 설정 (레벨/포맷)
@@ -214,7 +213,7 @@ def search_docs_wrapper(query: str) -> dict:
     # LLM 호출 없이 문서 내용만 반환
     context = "\n\n".join([f"• {doc.page_content[:200]}" for doc in docs])
     return {"output": f"검색 결과:\n{context}"}
-      
+
 # ===== 도구 입력 스키마 정의 =====
 class NewsInput(BaseModel):
     count: int = Field(default=5, description="조회할 뉴스 개수 (1~20)")
@@ -231,27 +230,27 @@ class DocsInput(BaseModel):
 
 # ===== LangChain 도구 정의 =====
 tools = [
-    Tool(
-        name="get_latest_news",
+    StructuredTool.from_function(
         func=get_latest_news_wrapper,
+        name="get_latest_news",
         description="최신 경제 뉴스 조회",
         args_schema=NewsInput
     ),
-    Tool(
+    StructuredTool.from_function(
+        func=get_indicator_wrapper,
         name="get_indicator",
-        func=lambda indicator_type: get_indicator_wrapper(indicator_type),
         description="실시간 경제지표 조회",
         args_schema=IndicatorInput
     ),
-    Tool(
+    StructuredTool.from_function(
+        func=get_market_wrapper,
         name="get_market",
-        func=lambda market_type, ticker="": get_market_wrapper(market_type, ticker),
-        description="실시간 주가/지수/환율 조회",
+        description="실시간 주가/지수/환율 조회. market_type과 ticker 파라미터를 받습니다.",
         args_schema=MarketInput
     ),
-    Tool(
+    StructuredTool.from_function(
+        func=search_docs_wrapper,
         name="search_docs",
-        func=lambda query: search_docs_wrapper(query),
         description="웹서비스 사용법/기능/도움말 관련 문서 검색",
         args_schema=DocsInput
     )
