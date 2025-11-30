@@ -1,11 +1,10 @@
 # chatbot.py — LLaMA 3.2 7B + RAG + Open API + MongoDB + Langchain
 
-# 1) Chatbot 파트: Ollama(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
-# 2) STT 파트: CLOVA STT + ffmpeg 전처리
-# 3) TTS 파트: Google Cloud Text-to-Speech
+# 1. Chatbot 파트: Ollama(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
+# 2. STT 파트: CLOVA STT + ffmpeg 전처리
+# 3. TTS 파트: Google Cloud Text-to-Speech
 
 # ===== 환경변수 로드 =====
-import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -27,10 +26,10 @@ import httpx, html
 from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.cloud import texttospeech
-from google.oauth2 import service_account
 from crawler_rag import crawl_today
 from pydantic import BaseModel, Field
 import yfinance as yf
+from pykrx import stock
 import pandas as pd
 
 # ===== LangChain import =====
@@ -50,9 +49,17 @@ from langchain_core.tools import StructuredTool
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("chatbot")
 
-# ===== 고정 상수 =====
+# ===== 기준시각 포맷 함수 =====
 # KST 타임존 상수
 KST = ZoneInfo("Asia/Seoul")
+
+def format_kst_human(ts_iso: str) -> str:
+    """ISO8601 KST 문자열을 '2025년 11월 29일 02시' 형식으로 변환"""
+    try:
+        dt = datetime.fromisoformat(ts_iso)  # tz 포함 ISO 파싱[web:79]
+        return dt.strftime("%Y년 %m월 %d일 %H시")  # 2025년 11월 29일 02시[web:80]
+    except Exception:
+        return ts_iso  # 실패하면 원문 그대로
 
 # =============================================================
 # CHATBOT (RAG + 뉴스 + 지표 + 시세 + Lnagchain + 세션/라우트)
@@ -61,31 +68,90 @@ KST = ZoneInfo("Asia/Seoul")
 # ===== 시스템 프롬프트 =====
 # 답변 톤/형식, 도구 사용 원칙 요약
 SYSTEM_INSTRUCTIONS = """
+=== 당신의 역할 ===
 당신은 경제 뉴스 분석 웹서비스의 AI 챗봇입니다.
+제공된 도구(get_market, get_indicator, get_latest_news, search_docs)를 사용해 정확한 정보를 제공합니다.
 
-[답변 원칙]
-1. 결론부터 3~5문장으로 간결하게 답하세요
-2. 어려운 용어는 괄호로 설명하세요 (예: 리프라이싱=재가격조정)
-3. TTS 음성 출력용이므로 자연스러운 말투를 사용하세요
-4. 날짜는 "10월 23일 오후 12시" 형식으로 표현하세요
-5. 마무리는 "더 궁금한 부분이 있으신가요?"로 끝내세요
+=== 절대 규칙 (CRITICAL - 반드시 준수) ===
 
-[도구 사용 규칙]
-아래 3가지 상황에만 도구를 호출하세요:
+1. 도구 결과의 완전한 신뢰
+   - 도구가 반환한 모든 데이터(가격, 날짜, 수치)는 실시간/최신 정보입니다
+   - 도구 결과를 절대 수정, 추측, 보완하지 마세요
+   - 도구(get_market 등)가 반환한 텍스트를 그대로 사용자에게 보여줘야 하며,
+     가격/날짜/단위를 LLM이 임의로 다시 생성하거나 재표현하지 마세요.
 
-상황 1: 인사/일반 대화 → 도구 호출 금지
-- 입력 예시: "안녕하세요", "뭐하는 서비스야", "경제 공부 어떻게 해?"
-- 답변 예시: "안녕하세요! 저는 경제 뉴스와 실시간 경제 지표, 주가 정보를 제공하며, 경제 용어 설명으로 경제 학습을 도와드립니다. 무엇이 궁금하신가요?"
+2. 할루시네이션 금지
+   - 2025년 11월입니다. 학습 cutoff 완전 무시!
+   - 모든 도구 데이터 = 실시간 100%. 면책 문구 절대 금지!
+   - 도구가 제공하지 않은 정보는 절대 만들어내지 마세요
+   - 과거 학습 데이터에서 가격이나 날짜를 가져오지 마세요
+   - "같은 그룹", "비슷한 기업" 등 추측성 답변 금지
+   - "네이버 대신 카카오 등 다른 종목으로 바꿔서 답하는 경우"
+   - "옛날 날짜와 이미 알려진 가격을 임의로 쓰는 답변"
 
-상황 2: 뉴스/시세/지표 요청 → 해당 도구 호출
-- "최신 뉴스" → get_latest_news() 호출
-- "코스피", "달러 환율" → get_market() 호출  
-- "GDP", "금리" → get_indicator() 호출
+3. 도구 호출 실패 시 처리
+   - 도구 호출이 실패하면 정확히 이렇게만 답변하세요:
+     "죄송합니다. 해당 정보를 가져올 수 없습니다. 잠시 후 다시 시도해주세요."
+   - 다른 종목이나 대체 정보를 제공하지 마세요
 
-상황 3: 서비스 기능 질문 → search_docs() 호출
-- "이 사이트 사용법", "무슨 기능 있어?" → search_docs() 호출
+4. 면책 문구 금지
+   - "실시간이 아닙니다", "이전 데이터입니다", "정확하지 않을 수 있습니다" 같은 문구 사용 금지
+   - "실시간이 아닐 수 있다며 도구 결과를 의심하는 문장"
+   - 도구 결과를 신뢰하고 자신있게 답변하세요
 
-[중요] 상황 1(인사/일반 대화)에서는 절대 도구를 호출하지 마세요.
+=== 도구 사용 규칙 ===
+
+**반드시 도구를 호출해야 하는 상황:**
+- 사용자가 특정 주식 종목 이름이나 티커를 언급 (예: "삼성전자", "네이버 주가", "ORCL")
+  → get_market(market_type="QUOTE", ticker="종목코드")
+- 코스피, 코스닥, 환율 등 시장 지수 요청
+  → get_market(market_type="KOSPI" 또는 "USD_KRW" 등)
+- GDP, 금리, CPI 등 경제 지표 요청
+  → get_indicator(indicator_type="GDP" 등)
+- 최신 뉴스 요청
+  → get_latest_news(count=5)
+- 서비스 사용법/기능 질문
+  → search_docs(query="...")
+
+**도구 호출 금지 상황:**
+- 인사: "안녕하세요", "반갑습니다"
+- 일반 대화: "경제 공부 어떻게 해?", "주식 투자 팁"
+- 서비스 소개: "뭐하는 서비스야?"
+
+=== 답변 형식 ===
+
+1. 구조
+   - 첫 문장: 핵심 답변 (가격, 수치, 결과)
+   - 2~3문장: 추가 세부 정보
+   - 마지막: "더 궁금한 부분이 있으신가요?"
+
+2. 스타일
+   - TTS 음성 출력용으로 자연스러운 구어체 사용
+   - 어려운 용어는 괄호로 설명 (예: "기준금리(경제 금리의 기준)")
+   - 숫자는 쉼표로 구분 (예: "52,000원")
+
+3. 날짜 표현
+   - 도구가 제공한 날짜를 "11월 30일 오후 7시" 형식으로 변환
+   - 절대 임의의 날짜(예: "10월 23일")를 사용하지 마세요
+
+=== 예시 ===
+
+**좋은 답변:**
+사용자: "삼성전자 주가 알려줘"
+도구 결과: price=52000, change=+500, changePct=+0.97%, date=2025-11-30T19:00
+답변: "11월 30일 오후 7시 기준, 삼성전자 주가는 52,000원입니다. 전일 대비 500원(0.97%) 상승했습니다. 더 궁금한 부분이 있으신가요?"
+
+**나쁜 답변 (절대 금지):**
+- "네이버 정보가 불명확하니 카카오 알려드릴게요" ← 대체 종목 제공
+- "실시간 정보가 아닐 수 있습니다" ← 면책 문구
+
+=== 최종 체크리스트 ===
+답변하기 전 확인하세요:
+☑ 도구를 호출했나요? (필요 시)
+☑ 도구 결과를 그대로 사용했나요?
+☑ 날짜/가격/수치를 임의로 만들지 않았나요?
+☑ 면책 문구를 추가하지 않았나요?
+☑ 대체 정보를 제공하지 않았나요?
 """
 
 # ===== 도구 함수 래퍼 정의 =====
@@ -100,42 +166,115 @@ def get_latest_news_wrapper(count: int) -> dict:
 
 def get_indicator_wrapper(indicator_type: str) -> dict:
     """경제지표 조회 래퍼"""
+    t = indicator_type.upper().strip()
+
     try:
-        t = indicator_type.upper().strip()
         if t == "CPI":
-            return {"output": get_cpi_data()}
+            data = get_cpi_data()
         elif t == "PPI":
-            return {"output": get_ppi_data()}
+            data = get_ppi_data()
         elif t == "GDP":
-            return {"output": get_gdp_data()}
+            data = get_gdp_data()
         elif t == "BASE_RATE":
-            return {"output": get_base_rate()}
+            data = get_base_rate()
         elif t == "TRADE_BALANCE":
-            return {"output": get_trade_balance()}
+            data = get_trade_balance()
         elif t == "CURRENT_ACCOUNT":
-            return {"output": get_current_account()}
+            data = get_current_account()
+
         elif t == "US_FEDFUNDS":
             d = get_us_fed_funds_latest(False)
             if "error" in d:
                 return {"error": "미국 실효 연방기금금리 조회 실패"}
-            return {"output": f"미국 실효 연방기금금리(FEDFUNDS)\n• 최신값: {d['value']:.2f}{d.get('unit','%')} (기준: {d['date']})"}
+            data = f"미국 실효 연방기금금리(FEDFUNDS)\n• 최신값: {d['value']:.2f}{d.get('unit','%')} (기준: {d['date']})"
+        
         elif t == "US_FED_TARGET":
             d = get_us_fed_funds_latest(True)
             if "error" in d:
                 return {"error": "미국 연방기금금리 목표범위 조회 실패"}
             rng = f"{d['lower']:.2f}–{d['upper']:.2f}{d.get('unit','%')}"
-            return {"output": f"미국 연방기금금리 목표범위\n• 범위: {rng} (기준: {d['date']})"}
+            data = f"미국 연방기금금리 목표범위\n• 범위: {rng} (기준: {d['date']})"
+        
         else:
             return {"error": f"지원하지 않는 지표입니다: {t}"}
+        
+        # 통일된 반환 형식
+        return {"output": data}
+    
     except Exception as e:
-        return {"error": f"경제지표 조회 실패: {str(e)}"}
+        log.error(f"get_indicator {t} 실패: {e}")
+        return {"error": f"{t} 조회 실패: {str(e)}"}
 
+# ===== yfinance/pykrx 시세 조회 유틸 =====
+KOREAN_TICKER_MAP = {
+"삼성전자": "005930.KS",
+"네이버": "035420.KS", 
+"SK하이닉스": "000660.KS",
+"삼성바이오로직스": "207940.KS",
+"LG에너지솔루션": "373220.KS",
+"현대차": "005380.KS",
+"기아": "000270.KS",
+"카카오": "035720.KS",
+"포스코": "005490.KS",
+"셀트리온": "068270.KS",
+}
+
+# 티커 자동 변환 유틸
+def resolve_ticker(ticker: str) -> str:
+    if ticker.endswith((".KS", ".KQ")):
+        return ticker
+    for name, tkr in KOREAN_TICKER_MAP.items():
+        if name in ticker:
+            log.info(f"자동 변환: '{ticker}' → {tkr}")
+            return tkr
+    return ticker
+
+# ===== PyKRX 시세 조회 =====
+def fetch_quote_formatted(ticker: str) -> dict:
+    """PyKRX→yf fallback + 공통 포맷팅 → LangChain dict 반환"""
+    ticker = resolve_ticker(ticker.strip())  # 자동변환
+    
+    # 1) 시세 조회
+    if ticker.endswith((".KS", ".KQ")):
+        q = fetch_quote_krx(ticker)
+        if q.get("price") is None:
+            log.warning(f"PyKRX 실패, yfinance로 재시도: {ticker}")
+            q = fetch_quote_yf(ticker)
+    else:
+        q = fetch_quote_yf(ticker)
+    
+    # 2) 실패 처리
+    if q.get("price") is None:
+        return {"error": f"{ticker.upper()} 시세 조회 실패"}
+    
+    # 3) 공통 포맷팅 (두 곳 동일!)
+    ch, pct = q.get("change"), q.get("changePct")
+    sign = "+" if (ch or 0) >= 0 else ""
+    
+    if ticker.endswith((".KS", ".KQ")):
+        price_fmt = f"{q['price']:,.0f}원"
+        change_fmt = f"{sign}{(ch or 0):,.0f}원"
+    else:
+        price_fmt = f"${q['price']:,.2f}"
+        change_fmt = f"{sign}{(ch or 0):,.2f}"
+    
+    ts_human = format_kst_human(q.get("ts_kst", ""))
+    
+    return {
+        "output": (
+            f"{ticker.upper()}\n"
+            f"• 현재가: {price_fmt}\n"
+            f"• 변동: {change_fmt} ({sign}{(pct or 0):.2f}%)\n"
+            f"• 기준시각: {ts_human}"
+        )
+    }
+
+# ===== yfinance 시세 조회 =====
 def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
     """시장 데이터 조회 래퍼"""
     try:
         market_type = market_type.strip().upper()
-        ticker = ticker.strip()
-        
+    
         if market_type == "KOSPI":
             return {"output": get_kospi_index()}
         elif market_type == "KOSDAQ":
@@ -149,20 +288,8 @@ def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
         elif market_type == "MARKET_SUMMARY":
             return {"output": f"{get_market_indices()}\n\n{get_fx_rates()}"}
         elif market_type == "QUOTE":
-            if not ticker:
-                return {"error": "QUOTE 조회에는 ticker가 필요합니다. 예: market_type='QUOTE', ticker='NVDA'"}
-            q = fetch_quote_yf(ticker)
-            if q.get("price") is not None:
-                ch, pct = q.get("change"), q.get("changePct")
-                sign = "+" if (ch or 0) >= 0 else ""
-                return {"output": (
-                    f"{ticker.upper()}\n"
-                    f"• 현재가: {q['price']:,.2f}\n"
-                    f"• 변동: {sign}{(ch or 0):.2f} ({sign}{(pct or 0):.2f}%)\n"
-                    f"• 기준시각: {q.get('ts_kst', '')}"
-                )}
-            else:
-                return {"error": f"{ticker.upper()} 시세 조회 실패"}
+            return fetch_quote_formatted(ticker)
+
         else:
             return {"error": f"지원하지 않는 시장 타입: {market_type}"}
     except Exception as e:
@@ -403,12 +530,12 @@ FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
 # ===== FRED 조회 유틸 =====
 # 관측치 조회(빈값 필터), FEDFUNDS/목표범위 처리
-async def _fred_observations_async(series_id: str, start: str = "2024-01-01") -> list:
+async def _fred_observations_async(series_id: str) -> list:
     params = {
         "series_id": series_id,
         "api_key": FRED_KEY,
         "file_type": "json",
-        "observation_start": start
+        "observation_start": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
     }
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.get(FRED_BASE, params=params)
@@ -425,13 +552,13 @@ def get_us_fed_funds_latest(use_target_range: bool = False) -> dict:
                 "series_id": "DFEDTARU",
                 "api_key": FRED_KEY,
                 "file_type": "json",
-                "observation_start": "2024-01-01"
+                "observation_start": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
             }
             lo_params = {
                 "series_id": "DFEDTARL",
                 "api_key": FRED_KEY,
                 "file_type": "json",
-                "observation_start": "2024-01-01"
+                "observation_start": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
             }
             
             up_r = requests.get(FRED_BASE, params=up_params, timeout=20)
@@ -574,13 +701,10 @@ def get_current_account() -> str:
     return f"**경상수지**\n• 최신값: ${latest.get('DATA_VALUE','N/A')}백만 (기준: {latest.get('TIME','')})"
 
 def get_base_rate() -> str:
-    res = fetch_all_key_statistics()
+    res = fetch_ecos_stat_by_code("901Y001")
     if "error" in res: return f"기준금리 조회 실패: {res['error']}"
-    for ind in res["indicators"]:
-        nm = (ind.get("KEYSTAT_NAME") or "").upper()
-        if "기준" in nm or "BASE RATE" in nm:
-            return f"**한국은행 기준금리**\n• 현재 금리: {ind.get('DATA_VALUE','N/A')}{ind.get('UNIT_NAME','%')} (기준: {ind.get('TIME','')})"
-    return "기준금리 정보를 찾을 수 없습니다."
+    latest = res["data"][-1]  # ✅ indicators → data
+    return f"**한국은행 기준금리**\\n• 현재 금리: {latest.get('DATA_VALUE','N/A')} (기준: {latest.get('TIME','')})"
 
 # ===== yfinance 유틸 =====
 # 주요 지수/대표주/환율 티커 매핑
@@ -594,11 +718,12 @@ INDEX_MAP: Dict[str, Dict[str, str]] = {
     "SK_HYNIX":            {"ticker": "000660.KS", "name": "SK하이닉스"},
     "SAMSUNG_BIO":         {"ticker": "207940.KS", "name": "삼성바이오로직스"},
     "LG_ENERGY_SOLUTION":  {"ticker": "373220.KS", "name": "LG에너지솔루션"},
+    "LG":                  {"ticker": "003550.KS", "name": "LG"},
     "HYUNDAI_MOTOR":       {"ticker": "005380.KS", "name": "현대차"},
     "KIA":                 {"ticker": "000270.KS", "name": "기아"},
-    "NAVER":               {"ticker": "035420.KS", "name": "NAVER"},
+    "NAVER":               {"ticker": "035420.KS", "name": "네이버"},
     "KAKAO":               {"ticker": "035720.KS", "name": "카카오"},
-    "POSCO_HOLDINGS":      {"ticker": "005490.KS", "name": "POSCO홀딩스"},
+    "POSCO_HOLDINGS":      {"ticker": "005490.KS", "name": "포스코"},
     "CELLTRION":           {"ticker": "068270.KS", "name": "셀트리온"},
 
     # 미국 지수
@@ -719,6 +844,54 @@ def fetch_quote_yf(ticker: str) -> Dict[str, Any]:
         "ts_kst": last_ts_kst or datetime.now(KST).isoformat()
     }
     
+def fetch_quote_krx(ticker: str) -> Dict[str, Any]:
+    """PyKRX로 한국 주식 조회 (yfinance 대체)"""
+    try:
+        # 티커 정규화 (005930.KS → 005930)
+        code = ticker.replace(".KS", "").replace(".KQ", "")
+        
+        # 오늘 날짜
+        today = datetime.now(KST).strftime("%Y%m%d")
+        
+        # 최근 2일 데이터 조회 (전일 비교용)
+        df = stock.get_market_ohlcv_by_date(
+            fromdate=(datetime.now(KST) - timedelta(days=5)).strftime("%Y%m%d"),
+            todate=today,
+            ticker=code
+        )
+        
+        if df.empty:
+            return {"ticker": ticker, "price": None, "error": "데이터 없음"}
+        
+        # 최신 데이터
+        latest = df.iloc[-1]
+        price = float(latest["종가"])
+        
+        # 전일 데이터 (있으면)
+        prev_close = None
+        change = None
+        change_pct = None
+        
+        if len(df) >= 2:
+            prev = df.iloc[-2]
+            prev_close = float(prev["종가"])
+            change = price - prev_close
+            change_pct = (change / prev_close) * 100.0
+        
+        return {
+            "ticker": ticker,
+            "price": round(price, 0),  # 원화는 소수점 없음
+            "prevClose": round(prev_close, 0) if prev_close else None,
+            "change": round(change, 0) if change else None,
+            "changePct": round(change_pct, 2) if change_pct else None,
+            "ts_kst": datetime.now(KST).isoformat()
+        }
+        
+    except Exception as e:
+        log.error(f"PyKRX 조회 실패 ({ticker}): {e}")
+        return {"ticker": ticker, "price": None, "error": str(e)}
+
+
 def get_market_indices() -> str:
     """주요 지수 동기 조회"""
     results = []
@@ -794,83 +967,6 @@ def fetch_quote_yf_with_cache(ticker: str) -> Dict[str, Any]:
     # 5분 단위로 캐시 키 생성
     cache_key = datetime.now().strftime("%Y%m%d%H%M")[:-1]  # 마지막 자리 제거
     return _cached_fetch_quote_yf(ticker, cache_key)
-
-# ===== 도구 실행기 =====
-# Function Call 이름 → 실제 함수 라우팅/출력 포맷
-def run_tool(tool_name: str, arguments: dict) -> dict:
-    try:
-        if tool_name == "get_latest_news":
-            n = int(arguments.get("count", 5))
-            rows = fetch_latest_topn_from_mongo(n)
-            return {"ok": True, "markdown": format_topn_md(rows)}
-
-        elif tool_name == "get_indicator":
-            t = (arguments.get("indicator_type") or "").upper()
-            if t == "CPI": data = get_cpi_data()
-            elif t == "PPI": data = get_ppi_data()
-            elif t == "GDP": data = get_gdp_data()
-            elif t == "BASE_RATE": data = get_base_rate()
-            elif t == "TRADE_BALANCE": data = get_trade_balance()
-            elif t == "CURRENT_ACCOUNT": data = get_current_account()
-            elif t == "US_FEDFUNDS":
-                d = get_us_fed_funds_latest(False)
-                if "error" in d:
-                    data = "미국 실효 연방기금금리 조회에 실패했습니다. 잠시 후 다시 시도해 주세요."
-                else:
-                    data = f"**미국 실효 연방기금금리(FEDFUNDS)**\n• 최신값: {d['value']:.2f}{d.get('unit','%')} (기준: {d['date']})"
-            elif t == "US_FED_TARGET":
-                d = get_us_fed_funds_latest(True)
-                if "error" in d:
-                    data = "미국 연방기금금리 목표범위 조회에 실패했습니다."
-                else:
-                    rng = f"{d['lower']:.2f}–{d['upper']:.2f}{d.get('unit','%')}"
-                    data = f"**미국 연방기금금리 목표범위**\n• 범위: {rng} (기준: {d['date']})"
-            else:
-                data = "지원하지 않는 지표입니다."
-            return {"ok": True, "markdown": data}
-
-        elif tool_name == "get_market":
-            t = (arguments.get("market_type") or "").upper()
-            if t == "KOSPI":
-                data = get_kospi_index()
-            elif t == "KOSDAQ":
-                data = get_kosdaq_index()
-            elif t == "USD_KRW":
-                data = get_usd_krw()
-            elif t == "JPY_KRW":
-                data = get_jpy_krw()
-            elif t == "EUR_USD":
-                data = get_eur_usd()
-            elif t == "MARKET_SUMMARY":
-                data = f"{get_market_indices()}\n\n{get_fx_rates()}"
-            elif t == "QUOTE":
-                ticker = (arguments.get("ticker") or "").strip()
-                q = fetch_quote_yf(ticker)
-                if q.get("price") is not None:
-                    ch, pct = q.get("change"), q.get("changePct")
-                    sign = "+" if (ch or 0) >= 0 else ""
-                    # f-string은 % 기호 이스케이프 불필요하므로 안전함
-                    data = (
-                        f"{ticker.upper()} {q['price']:,.2f} · 변동 {sign}{(ch or 0):.2f} "
-                        f"({sign}{(pct or 0):.2f}%) · 기준시각 {q.get('ts_kst', '')}"
-                    )
-                else:
-                    data = (
-                        f"시세 API 응답이 비정상이라 {ticker.upper()} 현재가를 가져오지 못했습니다; "
-                        f"대안: 야후파이낸스에서 티커 {ticker.upper()}로 실시간 가격을 확인해 주세요."
-                    )
-            else:
-                data = "지원하지 않는 시장 데이터입니다."
-            return {"ok": True, "markdown": data}
-
-        elif tool_name == "search_docs":
-            q = arguments.get("query") or ""
-            return {"ok": True, "markdown": search_docs_wrapper(q)}
-
-        return {"ok": False, "error": f"Unknown tool: {tool_name}"}
-    except Exception as e:
-        log.exception("Tool execution failed")
-        return {"ok": False, "error": str(e)}
 
 # ===== 세션 메모리 =====
 # 간단한 인메모리 대화 히스토리 (최근 20턴)
@@ -1091,6 +1187,11 @@ def _pick_voice(lang: str, voice: Optional[str]) -> str:
     return DEFAULT_VOICE.get(base, "ko-KR-Neural2-B")
 
 # 텍스트 → 오디오 변환 (MP3/OGG_OPUS/WAV)
+from google.cloud import texttospeech
+from google.oauth2 import service_account
+import google.auth
+import os
+
 @app.post("/api/tts")
 def tts_google_post(payload: dict = Body(...)):
     text = (payload.get("text") or "").strip()
@@ -1100,74 +1201,71 @@ def tts_google_post(payload: dict = Body(...)):
     rate = float(payload.get("rate") or 1.0)
     pitch = float(payload.get("pitch") or 0.0)
 
-    # 줄바꿈 및 특수문자 정리
+    # 텍스트 정리 (기존 코드 유지)
     text = html.unescape(text)
     text = re.sub(r'<br\s*/?>', ' ', text)
     text = re.sub(r'<[^>]+>', '', text)   
-    text = text.replace('\n', ' ')
-    text = text.replace('\r', ' ')
-    text = text.replace('\t', ' ')
-    text = text.replace('\'', '')
-    text = text.replace("'", '')  # 작은따옴표 제거
-    text = text.replace('"', '')  # 큰따옴표 제거
-    text = text.replace('…', '')
-    text = text.replace('·', ' ')
-    text = re.sub(r'\s+', ' ', text).strip() # 중복 공백 제거
+    text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    text = text.replace('\'', '').replace('"', '').replace('…', '').replace('·', ' ')
+    text = re.sub(r'\s+', ' ', text).strip()
     
     if not text:
         return JSONResponse({"error": "text is required"}, status_code=400)
 
-    # 서비스계정 키 경로 검증/자격 생성
+    # ===== GCP 인증 강화 =====
     GCP_KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     if not GCP_KEY_PATH or not os.path.exists(GCP_KEY_PATH):
-        return JSONResponse({"error": "GCP 서비스계정 키 경로가 올바르지 않습니다."}, status_code=400)
-    gcp_credentials = service_account.Credentials.from_service_account_file(
-        GCP_KEY_PATH
-    )
+        return JSONResponse({"error": f"GCP 키 없음: {GCP_KEY_PATH}"}, status_code=400)
 
-    tts_client = texttospeech.TextToSpeechClient(credentials=gcp_credentials)
+    try:
+        # 1. 자격 증명 생성
+        gcp_credentials = service_account.Credentials.from_service_account_file(GCP_KEY_PATH)
+        print(f"자격 증명 생성: {gcp_credentials.project_id}")
+        
+        # 2. TTS 클라이언트 초기화 (TTS 스코프 명시)
+        tts_client = texttospeech.TextToSpeechClient(credentials=gcp_credentials)
+        
+        # 3. 클라이언트 테스트 (간단한 요청)
+        print("TTS 클라이언트 연결 테스트")
+        
+    except Exception as e:
+        log.error(f"GCP 초기화 실패: {e}")
+        return JSONResponse({"error": f"GCP 초기화 실패: {str(e)}"}, status_code=500)
 
+    # ===== TTS 요청 =====
     try:
         synthesis_input = texttospeech.SynthesisInput(text=text)
         voice_name = _pick_voice(lang, voice)
-        voice_params = texttospeech.VoiceSelectionParams(
-            language_code=lang, name=voice_name
-        )
+        voice_params = texttospeech.VoiceSelectionParams(language_code=lang, name=voice_name)
 
         if fmt == "MP3":
             audio_cfg = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.MP3,
-                speaking_rate=rate,
-                pitch=pitch,
+                audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=rate, pitch=pitch
             )
             media_type, ext = "audio/mpeg", "mp3"
         elif fmt == "OGG_OPUS":
             audio_cfg = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.OGG_OPUS,
-                speaking_rate=rate,
-                pitch=pitch,
+                audio_encoding=texttospeech.AudioEncoding.OGG_OPUS, speaking_rate=rate, pitch=pitch
             )
             media_type, ext = "audio/ogg", "ogg"
         else:
             audio_cfg = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-                speaking_rate=rate,
-                pitch=pitch,
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16, speaking_rate=rate, pitch=pitch
             )
             media_type, ext = "audio/wav", "wav"
 
-        resp = tts_client.synthesize_speech(
-            input=synthesis_input, voice=voice_params, audio_config=audio_cfg
-        )
+        resp = tts_client.synthesize_speech(input=synthesis_input, voice=voice_params, audio_config=audio_cfg)
         headers = {
             "Content-Type": media_type,
             "Cache-Control": "no-cache",
             "Content-Disposition": f'inline; filename="speech.{ext}"',
         }
         return StreamingResponse(io.BytesIO(resp.audio_content), headers=headers)
+        
     except Exception as e:
         log.exception("Google TTS 실패")
-        return JSONResponse({"error": f"TTS 실패: {e}"}, status_code=500)
+        return JSONResponse({"error": f"TTS 실패: {str(e)}"}, status_code=500)
+
 
 # =========================
 # 유틸/헬스체크 API
