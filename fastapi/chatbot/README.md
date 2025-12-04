@@ -1,5 +1,5 @@
 ### APScheduler로 실시간 뉴스 수집
-[네이버 실시간 기사 수집 크롤러 코드](./crawler_rag.py)
+[실시간 네이버 뉴스 수집 크롤러 코드](./crawler_rag.py)
 
 ### Watchdog으로 Docs 실시간 감시 및 Vector_store_id 검증
 [문서 폴더 감시 → OpenAI 벡터스토어 업로드 코드](./watcher.py)
