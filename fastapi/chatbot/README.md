@@ -1,5 +1,7 @@
 ### 챗봇 아키텍쳐 다이어그램
 
+<img width="681" height="631" alt="Image" src="https://github.com/user-attachments/assets/b531cd6d-4b9e-45d0-9a02-fbdf8db68281" />
+
 ### APScheduler로 실시간 뉴스 수집
 [실시간 네이버 뉴스 수집 크롤러 코드](./crawler_rag.py)
 
