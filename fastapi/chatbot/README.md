@@ -6,6 +6,9 @@
 ### Watchdog으로 Docs 실시간 감시 및 Vectorstore 업로드
 [문서 폴더 감시 → OpenAI 벡터스토어 업로드 코드](./watcher.py)
 
+### yoo-chatbot-v0
+- GPT-5 + RAG + Open API + MongoDB + Function Calling
+
 ### yoo-chatbot-v1 개선 사항
 
 [yoo-chatbot-v1 개선 사항](https://www.notion.so/yoo-chatbot-v1-2b3ca2ee78bc80bba29de68cc55027a2?pvs=21)
