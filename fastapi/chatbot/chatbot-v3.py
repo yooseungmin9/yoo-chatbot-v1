@@ -1,10 +1,11 @@
-# chatbot-gemma.py — Gemma 2 9B + RAG + Open API + MongoDB + Langchain
+# chatbot-v3.py — LLaMA 3.1 8B + RAG + Open API + MongoDB + Langchain
 
 # 1. Chatbot 파트: Ollama(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2. STT 파트: CLOVA STT + ffmpeg 전처리
 # 3. TTS 파트: Google Cloud Text-to-Speech
 
 # ===== 환경변수 로드 =====
+import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -464,12 +465,18 @@ _mongo_client = None
 def _get_mongo_client():
     global _mongo_client
     if _mongo_client is None:
-        _mongo_client = MongoClient(
-            MONGO_URI,
-            maxPoolSize=50,  # 최대 연결 수
-            minPoolSize=10,  # 최소 연결 수
-            serverSelectionTimeoutMS=3000
-        )
+        try:
+            _mongo_client = MongoClient(
+                MONGO_URI,
+                maxPoolSize=50,
+                minPoolSize=10,
+                serverSelectionTimeoutMS=3000
+            )
+            # 연결 확인
+            _mongo_client.admin.command('ping')
+        except Exception as e:
+            log.error(f"MongoDB 연결 실패: {e}")
+            raise
     return _mongo_client
 
 def _get_db():
@@ -519,7 +526,7 @@ def format_topn_md(rows):
     
     for i, r in enumerate(rows, 1):
         title = (r.get("title") or "").strip() or "제목 없음"
-        out.append(f"{i}번째 뉴스는 {title}입니다.\n")
+        out.append(f"{i}번째 뉴스는 \"{title}\"입니다.\n")
     
     return "\n".join(out)
 
@@ -631,9 +638,10 @@ def fetch_all_key_statistics() -> dict:
         if not rows:
             return {"error": "데이터 없음"}
         return {"ok": True, "indicators": rows}
+    except requests.Timeout:
+        return {"error": "ECOS 응답 지연(Timeout)", "source": "ECOS"}
     except Exception as e:
-        log.exception("ECOS 100대 지표 조회 오류")
-        return {"error": str(e)}
+        return {"error": f"ECOS 조회 실패: {e}", "source": "ECOS"}
 
 def fetch_ecos_stat_by_code(stat_code: str, start_ym: str = None, end_ym: str = None) -> dict:
     try:
@@ -1000,6 +1008,17 @@ def _job_naver():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ===== Startup =====
+    # 필수 환경변수 체크
+    required_keys = {
+        "CLOVA_KEY_ID": CLOVA_KEY_ID,
+        "CLOVA_KEY": CLOVA_KEY,
+        "ECOS_API_KEY": ECOS_API_KEY,
+        "FRED_KEY": FRED_KEY
+    }
+    missing = [k for k, v in required_keys.items() if not v]
+    if missing:
+        log.error(f"필수 환경변수 누락: {missing}")
+        raise RuntimeError(f"Missing required env vars: {missing}")
     # MongoDB 인덱스 생성
     try:
         _ensure_indexes()

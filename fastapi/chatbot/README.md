@@ -1,0 +1,33 @@
+### APScheduler로 실시간 뉴스 수집
+[네이버 실시간 기사 수집 크롤러](./crawler_rag.py)
+
+### Watchdog으로 Docs 실시간 감시 및 Vector_store_id 검증
+[문서 폴더 감시 → OpenAI 벡터스토어 업로드](./watcher.py)
+
+### yoo-chatbot-v1 개선 사항
+
+[yoo-chatbot-v1 개선 사항](https://www.notion.so/yoo-chatbot-v1-2b3ca2ee78bc80bba29de68cc55027a2?pvs=21)
+
+- GPT-4o-mini + 코드 구조 개선
+- TTS 친화적 답변, 프론트 엔드 개선
+
+### yoo-chatbot-v2 개선 사항
+
+[yoo-chatbot-v2 개선 사항](https://www.notion.so/yoo-chatbot-v2-2bfca2ee78bc805dab7ae2ceb37db0ea?pvs=21)
+
+- 기존 v1 + GPT-4 (파인튜닝 시도) → 모델이 망가짐
+- [파인튜닝 파일](./training_data.jsonl)
+
+### yoo-chatbot-v3 개선 사항
+
+[yoo-chatbot-v3 개선사항](https://www.notion.so/yoo-chatbot-v3-2bfca2ee78bc80be8b89ea3c53deff08?pvs=21)
+
+- 기존 v2 + LLaMA 3.1 8B (오픈소스 모델 활용/ GPT-3.5 급 sLLM)
+- Langchain과 Tool Calling 활용
+
+### yoo-chatbot-v4 개선 사항
+
+[yoo-chatbot-v4 개선사항](https://www.notion.so/yoo-chatbot-v4-2bfca2ee78bc80bda0cdde2b06b036ae?pvs=21)
+
+- 기존 v3 + Gemma 2 9B (다른 모델 활용/ GPT-4o-mini 급 sLLM)
+- VectorDB(Qdrant)과 4bit 양자화, LM Studio 시도

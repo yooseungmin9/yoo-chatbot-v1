@@ -1,4 +1,4 @@
-# chatbot-ft.py — ft:GPT-4o-mini + RAG + Open API + MongoDB + Function Calling
+# chatbot-v2.py — ft:GPT-4o-mini + RAG + Open API + MongoDB + Function Calling
 
 # 1) Chatbot 파트: OpenAI(Function Calling), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2) STT 파트: CLOVA STT + ffmpeg 전처리
