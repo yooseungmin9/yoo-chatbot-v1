@@ -2,12 +2,6 @@
 
 <img width="681" height="631" alt="Image" src="https://github.com/user-attachments/assets/743ba026-62fc-46c6-94ed-34d8703524aa" />
 
-### APScheduler로 실시간 뉴스 수집
-[실시간 네이버 뉴스 수집 크롤러 코드](./crawler_rag.py)
-
-### Watchdog으로 Docs 실시간 감시 및 Vectorstore 업로드
-[문서 폴더 감시 → OpenAI 벡터스토어 업로드 코드](./watcher.py)
-
 ### yoo-chatbot-v0
 - GPT-5 + RAG + Open API + MongoDB + Function Calling
 
@@ -38,3 +32,9 @@
 
 - 기존 v3 + Gemma 2 9B (다른 모델 활용/ GPT-4o-mini 급 sLLM)
 - VectorDB(Qdrant)과 4bit 양자화, LM Studio 시도
+
+### APScheduler로 실시간 뉴스 수집
+[실시간 네이버 뉴스 수집 크롤러 코드](./crawler_rag.py)
+
+### Watchdog으로 Docs 실시간 감시 및 Vectorstore 업로드
+[문서 폴더 감시 → OpenAI 벡터스토어 업로드 코드](./watcher.py)
