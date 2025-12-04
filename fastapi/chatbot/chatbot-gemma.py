@@ -1,4 +1,4 @@
-# chatbot-gemma.py — Gemma 9B + RAG + Open API + MongoDB + Langchain
+# chatbot-gemma.py — Gemma 2 9B + RAG + Open API + MongoDB + Langchain
 
 # 1. Chatbot 파트: Ollama(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2. STT 파트: CLOVA STT + ffmpeg 전처리
