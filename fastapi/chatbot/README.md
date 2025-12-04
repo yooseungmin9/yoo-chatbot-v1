@@ -1,5 +1,4 @@
 ### 챗봇 아키텍쳐 다이어그램
-![Image](https://github.com/user-attachments/assets/3e971067-91ea-4a50-87b1-862aec1e5b92)
 
 ### APScheduler로 실시간 뉴스 수집
 [실시간 네이버 뉴스 수집 크롤러 코드](./crawler_rag.py)
