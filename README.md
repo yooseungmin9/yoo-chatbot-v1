@@ -1,8 +1,8 @@
 # 🧠 AI 기반 경제 뉴스 분석 웹서비스
 > SUMMARIX - 쉽고 빠르게 경제 뉴스의 흐름을 이해할 수 있는 AI 기반 웹서비스  
 > **기획 및 운영, 챗봇 담당** : 유승민
-> - 챗봇 시연 영상 
-> https://youtu.be/Bk_dYeuUDCE?si=dGZZ6Px7Fax4qNhX&t=114
+> - 챗봇 시연 영상  
+> https://youtu.be/Bk_dYeuUDCE?si=dGZZ6Px7Fax4qNhX&t=114  
 > - 코드 개선 사항 Notion 링크 - 12.04 최신화   
 > https://www.notion.so/yoo-chatbot-2bfca2ee78bc8089a2e6e8993860d803?pvs=12
 ---
