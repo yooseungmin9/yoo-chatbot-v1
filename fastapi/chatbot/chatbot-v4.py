@@ -1,8 +1,4 @@
-<<<<<<< HEAD:fastapi/chatbot/chatbot-gemma.py
-# chatbot-gemma.py — Gemma 2 9B + RAG + Open API + MongoDB + Langchain
-=======
-# chatbot-v4.py — Gemma 9B + RAG + Open API + MongoDB + Langchain
->>>>>>> b5eea91 (add: Chatbot/README.md, rename chatbot.py):fastapi/chatbot/chatbot-v4.py
+# chatbot-v4.py — Gemma 2 9B + RAG + Open API + MongoDB + Langchain + Tool Calling
 
 # 1. Chatbot 파트: Ollama(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2. STT 파트: CLOVA STT + ffmpeg 전처리

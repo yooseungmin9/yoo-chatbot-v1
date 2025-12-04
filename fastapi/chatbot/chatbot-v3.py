@@ -1,4 +1,4 @@
-# chatbot-v3.py — LLaMA 3.1 8B + RAG + Open API + MongoDB + Langchain
+# chatbot-v3.py — LLaMA 3.1 8B + RAG + Open API + MongoDB + Langchain + Tool Calling
 
 # 1. Chatbot 파트: Ollama(LangChain), MongoDB 최신뉴스, ECOS/FRED 경제지표, yfinance 경제시세, RAG 파일검색
 # 2. STT 파트: CLOVA STT + ffmpeg 전처리
