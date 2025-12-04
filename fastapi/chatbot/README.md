@@ -16,7 +16,7 @@
 [yoo-chatbot-v2 개선 사항](https://www.notion.so/yoo-chatbot-v2-2bfca2ee78bc805dab7ae2ceb37db0ea?pvs=21)
 
 - 기존 v1 + GPT-4 (파인튜닝 시도) → 모델이 망가짐
-- [파인튜닝 파일](./training_data.jsonl)
+- [경제 질답 300개 파인튜닝 파일](./training_data.jsonl)
 
 ### yoo-chatbot-v3 개선 사항
 
