@@ -4,7 +4,7 @@
 > - 시연 영상 - 01:54 부분  
 > https://youtu.be/Bk_dYeuUDCE?si=dGZZ6Px7Fax4qNhX&t=114
 > - 코드 개선 사항 Notion 링크 - 12.04 최신화   
-> https://www.notion.so/yoo-chatbot-v1-2b3ca2ee78bc80bba29de68cc55027a2?source=copy_link
+> https://www.notion.so/yoo-chatbot-2bfca2ee78bc8089a2e6e8993860d803?pvs=12
 ---
 
 ## 📌 개요
