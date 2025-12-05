@@ -90,7 +90,7 @@ AI가 뉴스 요약, 감성 분석, 키워드 추출을 자동화하여 사용�
 | Backend (AI) | **FastAPI**, OpenAI GPT-5, transformers, pandas   |
 | STT/TTS      | CLOVA Speech-to-Text, Google Cloud Text-to-Speech |
 | Database     | MongoDB Atlas                                     |
-| Data Source  | ECOS, FRED, yFinance, NAVER News crawler          |
+| Data Source  | ECOS, FRED, yFinance, NAVER News Crawler          |
 | Infra        | APScheduler, OpenAI Vector Store (RAG)            |
 | Frontend 연동  | Spring Boot + Thymeleaf                          |
 
@@ -102,8 +102,8 @@ AI가 뉴스 요약, 감성 분석, 키워드 추출을 자동화하여 사용�
 │
 ├── chatbot/
 │   ├─ chatbot.py           # GPT-5 Function Calling 챗봇 API
-│   ├─ chatbot_rag.py       # RAG 응답 전용 API
-│   ├─ watcher.py           # docs 폴더 실시간 감시 → Vector Store 자동 갱신
+│   ├─ chatbot_rag.py       # RAG 전용 실시간 뉴스 크롤러
+│   ├─ watcher.py           # docs 폴더 실시간 감시 → Vector Store 업로드
 │   ├─ .vector_store_id     # RAG 스토어 ID
 │   └─ .vs_state.json       # 인덱스 상태 메타정보
 └── spring/
