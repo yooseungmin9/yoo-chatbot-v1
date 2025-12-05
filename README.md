@@ -33,7 +33,7 @@ AI가 뉴스 요약, 감성 분석, 키워드 추출을 자동화하여 사용�
 
 ---
 
-## 💡 주요 기능
+## 💡 담당 기능
 
 ### 🤖 AI 챗봇 (FastAPI 기반)
 - GPT-5 기반 Function Calling 구조
@@ -90,9 +90,9 @@ AI가 뉴스 요약, 감성 분석, 키워드 추출을 자동화하여 사용�
 | Backend (AI) | **FastAPI**, OpenAI GPT-5, transformers, pandas   |
 | STT/TTS      | CLOVA Speech-to-Text, Google Cloud Text-to-Speech |
 | Database     | MongoDB Atlas                                     |
-| Data Source  | ECOS, FRED, yFinance, NAVER News API              |
+| Data Source  | ECOS, FRED, yFinance, NAVER News crawler          |
 | Infra        | APScheduler, OpenAI Vector Store (RAG)            |
-| Frontend 연동  | Spring Boot + Thymeleaf + Chart.js                |
+| Frontend 연동  | Spring Boot + Thymeleaf                          |
 
 ---
 
