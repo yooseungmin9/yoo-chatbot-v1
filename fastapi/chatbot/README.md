@@ -38,3 +38,6 @@
 
 ### Watchdog으로 Docs 실시간 감시 및 Vectorstore 업로드
 [문서 폴더 감시 → OpenAI 벡터스토어 업로드 코드](./watcher.py)
+
+### Watchdog으로 Docs 실시간 감시 및 로컬 Vectorstore 업로드
+[[문서 폴더 감시 → 로컬 벡터스토어 업로드 코드](./watcher-local.py)
