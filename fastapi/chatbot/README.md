@@ -42,4 +42,4 @@
 ### Watchdog으로 Docs 실시간 감시 및 로컬 Vectorstore 업로드
 [문서 폴더 감시 → 로컬 벡터스토어 업로드 코드](./watcher-local.py)
 - 오픈소스 모델로 만들면서 FAISS 활용, 로컬 벡터스토어 구현
-- OpenAI기반이 아닌 로컬 기반의 Watchdog 감시,업로딩 코드
+- OpenAI 기반이 아닌 로컬 기반의 Watchdog 감시,업로딩 코드
