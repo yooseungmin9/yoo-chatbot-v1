@@ -328,7 +328,7 @@ def create_vectorstore():
 # 벡터스토어 로드 (앱 시작 시)
 try:
     vectorstore = FAISS.load_local("./vectorstore", embeddings, allow_dangerous_deserialization=True)
-except:
+except Exception:
     vectorstore = create_vectorstore()
 
 # ===== 검색 함수 =====
@@ -1023,7 +1023,7 @@ async def lifespan(app: FastAPI):
     try:
         _ensure_indexes()
         log.info("MongoDB 인덱스 생성 완료")
-    except Exception as e:
+    except Exception:
         log.exception("인덱스 생성 실패")
 
     # 즉시 첫 크롤링 실행
@@ -1098,7 +1098,7 @@ async def chat(payload: dict = Body(...)):
     try:
         agent_answer = chat_with_agent(user_msg, session_id)
         return {"answer": agent_answer, "session_id": session_id}
-    except Exception as e:
+    except Exception:
         log.exception("chat failed")
         return {"answer": "일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요."}
 
