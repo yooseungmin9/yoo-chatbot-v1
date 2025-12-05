@@ -1,6 +1,6 @@
-### yoo-chatbot-v4 아키텍쳐 다이어그램
+### yoo-chatbot-v3 아키텍쳐 다이어그램
 
-<img width="681" height="631" alt="Image" src="https://github.com/user-attachments/assets/25443d7f-ff63-4768-b109-3205c3935196" />
+<img width="681" height="631" alt="Image" src="https://github.com/user-attachments/assets/1f15d608-d244-4cbc-a19c-665d71319616" />
 
 ### yoo-chatbot-v0
 - GPT-5 + RAG + Open API + MongoDB + Function Calling
