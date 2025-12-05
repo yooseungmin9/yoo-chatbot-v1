@@ -242,43 +242,31 @@ def resolve_ticker(ticker: str) -> str:
 
 # ===== PyKRX 시세 조회 =====
 def fetch_quote_formatted(ticker: str) -> dict:
-    """PyKRX→yf fallback + 공통 포맷팅 → LangChain dict 반환"""
-    ticker = resolve_ticker(ticker.strip())  # 자동변환
+    """PyKRX 우선 → yfinance 최소 fallback (LangChain용 숫자 형식)"""
+    ticker_code = resolve_ticker(ticker.strip())
+    log.info(f"쿼리: {ticker} → {ticker_code}")
     
-    # 1) 시세 조회
-    if ticker.endswith((".KS", ".KQ")):
-        q = fetch_quote_krx(ticker)
-        if q.get("price") is None:
-            log.warning(f"PyKRX 실패, yfinance로 재시도: {ticker}")
-            q = fetch_quote_yf(ticker)
-    else:
-        q = fetch_quote_yf(ticker)
+    # 1. 한국 주식: 6자리 코드 → PyKRX
+    if re.match(r'^\d{6}$', ticker_code):
+        q = fetch_quote_krx(ticker_code)
+        if q:
+            return {
+                "output": f"price={q['price']}, change={q['change']}, changePct={q['changePct']:.2f}, date={q['date']}"
+            }
     
-    # 2) 실패 처리
-    if q.get("price") is None:
-        return {"error": f"{ticker.upper()} 시세 조회 실패"}
+    # 2. 글로벌 주식/지수: yfinance (ORCL, ^KS11 등)
+    yf_ticker = ticker_code
+    if re.match(r'^\d{6}$', ticker_code):
+        yf_ticker = f"{ticker_code}.KS"  # PyKRX 실패시 yf용
     
-    # 3) 공통 포맷팅 (두 곳 동일!)
-    ch, pct = q.get("change"), q.get("changePct")
-    sign = "+" if (ch or 0) >= 0 else ""
+    q = fetch_quote_yf(yf_ticker)
+    if q:
+        return {
+            "output": f"price={q['price']}, change={q['change']}, changePct={q['changePct']:.2f}, date={q['date']}"
+        }
     
-    if ticker.endswith((".KS", ".KQ")):
-        price_fmt = f"{q['price']:,.0f}원"
-        change_fmt = f"{sign}{(ch or 0):,.0f}원"
-    else:
-        price_fmt = f"${q['price']:,.2f}"
-        change_fmt = f"{sign}{(ch or 0):,.2f}"
-    
-    ts_human = format_kst_human(q.get("ts_kst", ""))
-    
-    return {
-        "output": (
-            f"{ticker.upper()}\n"
-            f"• 현재가: {price_fmt}\n"
-            f"• 변동: {change_fmt} ({sign}{(pct or 0):.2f}%)\n"
-            f"• 기준시각: {ts_human}"
-        )
-    }
+    return {"error": f"{ticker} 데이터 없음"}
+
 
 # ===== yfinance 시세 조회 =====
 def get_market_wrapper(market_type: str, ticker: str = "") -> dict:

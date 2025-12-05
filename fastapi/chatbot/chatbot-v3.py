@@ -82,8 +82,8 @@ SYSTEM_INSTRUCTIONS = """
      가격/날짜/단위를 LLM이 임의로 다시 생성하거나 재표현하지 마세요.
 
 2. 할루시네이션 금지
-   - 2025년 11월입니다. 학습 cutoff 완전 무시!
-   - 모든 도구 데이터 = 실시간 100%. 면책 문구 절대 금지!
+   - 2025년 11월입니다. 학습 cutoff 완전 무시
+   - 모든 도구 데이터 = 실시간 100%. 면책 문구 절대 금지
    - 도구가 제공하지 않은 정보는 절대 만들어내지 마세요
    - 과거 학습 데이터에서 가격이나 날짜를 가져오지 마세요
    - "같은 그룹", "비슷한 기업" 등 추측성 답변 금지
@@ -107,7 +107,7 @@ SYSTEM_INSTRUCTIONS = """
   → get_market(market_type="QUOTE", ticker="종목코드")
 - 코스피, 코스닥, 환율 등 시장 지수 요청
   → get_market(market_type="KOSPI" 또는 "USD_KRW" 등)
-- GDP, 금리, CPI 등 경제 지표 요청
+- GDP, 한국금리, 미국금리 CPI 등 경제 지표 요청
   → get_indicator(indicator_type="GDP" 등)
 - 최신 뉴스 요청
   → get_latest_news(count=5)
@@ -129,21 +129,21 @@ SYSTEM_INSTRUCTIONS = """
 2. 스타일
    - TTS 음성 출력용으로 자연스러운 구어체 사용
    - 어려운 용어는 괄호로 설명 (예: "기준금리(경제 금리의 기준)")
-   - 숫자는 쉼표로 구분 (예: "52,000원")
+   - 숫자는 쉼표로 구분 (예: "00,000원")
    - 반드시 한국어로만 응답하세요.
    - 중국어, 일본어, 영어 단어를 사용하지 마세요.
    - 한자(漢字)를 사용하지 마세요.
 
 3. 날짜 표현
-   - 도구가 제공한 날짜를 "11월 30일 오후 7시" 형식으로 변환
+   - 도구가 제공한 날짜를 "00월 00일 오후 0시" 형식으로 변환
    - 절대 임의의 날짜(예: "10월 23일")를 사용하지 마세요
 
 === 예시 ===
 
 **좋은 답변:**
-사용자: "삼성전자 주가 알려줘"
-도구 결과: price=52000, change=+500, changePct=+0.97%, date=2025-11-30T19:00
-답변: "11월 30일 오후 7시 기준, 삼성전자 주가는 52,000원입니다. 전일 대비 500원(0.97%) 상승했습니다. 더 궁금한 부분이 있으신가요?"
+getmarket(markettype="QUOTE", ticker="삼성전자") 호출
+반환 형식: "price=52000, change=500, changePct=0.97, date=2025-11-30T19:00"
+숫자 그대로 사용! {"output": "..."} 파싱 안함
 
 **나쁜 답변 (절대 금지):**
 - "네이버 정보가 불명확하니 카카오 알려드릴게요" ← 대체 종목 제공
@@ -209,69 +209,143 @@ def get_indicator_wrapper(indicator_type: str) -> dict:
         log.error(f"get_indicator {t} 실패: {e}")
         return {"error": f"{t} 조회 실패: {str(e)}"}
 
-# ===== yfinance/pykrx 시세 조회 유틸 =====
+# ===== 한국 주식 티커 맵 =====
 KOREAN_TICKER_MAP = {
-"삼성전자": "005930.KS",
-"네이버": "035420.KS", 
-"SK하이닉스": "000660.KS",
-"삼성바이오로직스": "207940.KS",
-"LG에너지솔루션": "373220.KS",
-"현대차": "005380.KS",
-"기아": "000270.KS",
-"카카오": "035720.KS",
-"포스코": "005490.KS",
-"셀트리온": "068270.KS",
+    "삼성전자": "005930.KS",
+    "네이버": "035420.KS", 
+    "SK하이닉스": "000660.KS",
+    "삼성바이오로직스": "207940.KS",
+    "LG에너지솔루션": "373220.KS",
+    "현대차": "005380.KS",
+    "기아": "000270.KS",
+    "카카오": "035720.KS",
+    "포스코": "005490.KS",
+    "셀트리온": "068270.KS",
 }
 
-# 티커 자동 변환 유틸
-def resolve_ticker(ticker: str) -> str:
-    if ticker.endswith((".KS", ".KQ")):
-        return ticker
-    for name, tkr in KOREAN_TICKER_MAP.items():
-        if name in ticker:
-            log.info(f"자동 변환: '{ticker}' → {tkr}")
-            return tkr
+def format_kst_human(ts_iso: str) -> str:
+    """ISO → 사람 읽기 형식"""
+    try:
+        dt = datetime.fromisoformat(ts_iso.replace('Z', '+00:00'))
+        return dt.astimezone(KST).strftime("%m월 %d일 %p %I시")
+    except Exception:
+        return datetime.now(KST).strftime("%m월 %d일 %p %I시")
+
+def resolve_ticker(ticker_input: str) -> str:
+    ticker = ticker_input.strip().upper()
+    
+    # 이미 코드 형식
+    if re.match(r'^\d{6}(\.KS|\.KQ)?$', ticker):
+        return re.sub(r'(\.KS|\.KQ)$', '', ticker)
+    
+    # 이름 매핑
+    for name, code in KOREAN_TICKER_MAP.items():
+        if name.upper() in ticker:
+            log.info(f"이름→코드: {ticker} → {code}")
+            return code.replace('.KS', '')
+    
     return ticker
 
-# ===== PyKRX 시세 조회 =====
+def fetch_quote_krx(ticker_code: str) -> Dict[str, Any]:
+    """PyKRX 한국 주식 (30일 범위 확보)"""
+    try:
+        end_date = datetime.now(KST).strftime('%Y%m%d')
+        start_date = (datetime.now(KST) - timedelta(days=30)).strftime('%Y%m%d')
+        
+        df = stock.get_market_ohlcv_by_date(start_date, end_date, ticker_code)
+        if df.empty:
+            return {}
+        
+        latest = df.iloc[-1]
+        prev = df.iloc[-2] if len(df) > 1 else latest
+        
+        price = int(latest['종가'])
+        prev_price = int(prev['종가'])
+        change = price - prev_price
+        change_pct = round((change / prev_price * 100), 2) if prev_price else 0
+        
+        return {
+            'price': price,
+            'change': change,
+            'changePct': change_pct,
+            'date': latest.name.strftime('%Y-%m-%dT%H:%M:%S')
+        }
+    except Exception as e:
+        log.error(f"PyKRX {ticker_code}: {e}")
+        return {}
+
+def fetch_quote_yf(ticker: str) -> Dict[str, Any]:
+    """yfinance 글로벌 주식"""
+    try:
+        tkr = yf.Ticker(ticker)
+        hist = tkr.history(period="5d")
+        
+        if not hist.empty and 'Close' in hist.columns:
+            price = round(hist['Close'].iloc[-1])
+            prev_price = round(hist['Close'].iloc[-2]) if len(hist) > 1 else price
+        else:
+            info = tkr.info
+            price = round(float(info.get('regularMarketPrice', 0)))
+            prev_price = price
+        
+        change = price - prev_price
+        change_pct = round((change / prev_price * 100), 2) if prev_price else 0
+        
+        return {
+            'price': price,
+            'change': change,
+            'changePct': change_pct,
+            'date': datetime.now(KST).isoformat()
+        }
+    except Exception:
+        return {}
+
 def fetch_quote_formatted(ticker: str) -> dict:
-    """PyKRX→yf fallback + 공통 포맷팅 → LangChain dict 반환"""
-    ticker = resolve_ticker(ticker.strip())  # 자동변환
+    """PyKRX 우선 → yfinance 최소 fallback"""
+    ticker = resolve_ticker(ticker.strip())
+    log.info(f"쿼리 티커: {ticker}")
     
-    # 1) 시세 조회
-    if ticker.endswith((".KS", ".KQ")):
+    # 1. PyKRX (한국 주식)
+    if re.match(r'^\d{6}$', ticker):
         q = fetch_quote_krx(ticker)
-        if q.get("price") is None:
-            log.warning(f"PyKRX 실패, yfinance로 재시도: {ticker}")
-            q = fetch_quote_yf(ticker)
-    else:
-        q = fetch_quote_yf(ticker)
+        if q:
+            return {
+                "output": f"price={q['price']}, change={q['change']}, changePct={q['changePct']:.2f}, date={q['date']}"
+            }
     
-    # 2) 실패 처리
-    if q.get("price") is None:
-        return {"error": f"{ticker.upper()} 시세 조회 실패"}
+    # 2. yfinance (글로벌 주식)
+    yf_ticker = f"{ticker}.KS" if re.match(r'^\d{6}$', ticker) else ticker
+    q = fetch_quote_yf(yf_ticker)
+    if q:
+        return {
+            "output": f"price={q['price']}, change={q['change']}, changePct={q['changePct']:.2f}, date={q['date']}"
+        }
     
-    # 3) 공통 포맷팅 (두 곳 동일!)
-    ch, pct = q.get("change"), q.get("changePct")
-    sign = "+" if (ch or 0) >= 0 else ""
-    
-    if ticker.endswith((".KS", ".KQ")):
-        price_fmt = f"{q['price']:,.0f}원"
-        change_fmt = f"{sign}{(ch or 0):,.0f}원"
-    else:
-        price_fmt = f"${q['price']:,.2f}"
-        change_fmt = f"{sign}{(ch or 0):,.2f}"
-    
-    ts_human = format_kst_human(q.get("ts_kst", ""))
-    
-    return {
-        "output": (
-            f"{ticker.upper()}\n"
-            f"• 현재가: {price_fmt}\n"
-            f"• 변동: {change_fmt} ({sign}{(pct or 0):.2f}%)\n"
-            f"• 기준시각: {ts_human}"
-        )
-    }
+    return {"error": f"{ticker} 데이터 없음 (PyKRX/yf 모두 실패)"}
+
+def get_kospi_index() -> str:
+    """KOSPI 지수"""
+    q = fetch_quote_yf('^KS11')
+    if q.get('price'):
+        sign = '+' if (q.get('change', 0) > 0) else ''
+        return f"KOSPI {q['price']:,.2f} {sign}{q.get('change', 0):,.2f} ({sign}{q.get('changePct', 0):.2f}%)"
+    return "KOSPI 데이터 없음"
+
+def get_kosdaq_index() -> str:
+    """KOSDAQ 지수"""
+    q = fetch_quote_yf('^KQ11')
+    if q.get('price'):
+        sign = '+' if (q.get('change', 0) > 0) else ''
+        return f"KOSDAQ {q['price']:,.2f} {sign}{q.get('change', 0):,.2f} ({sign}{q.get('changePct', 0):.2f}%)"
+    return "KOSDAQ 데이터 없음"
+
+def get_usd_krw() -> str:
+    """원/달러 환율"""
+    q = fetch_quote_yf('KRW=X')
+    if q.get('price'):
+        sign = '+' if (q.get('change', 0) > 0) else ''
+        return f"USD/KRW {q['price']:,.2f} {sign}{q.get('change', 0):,.2f} ({sign}{q.get('changePct', 0):.2f}%)"
+    return "환율 데이터 없음"
 
 # ===== yfinance 시세 조회 =====
 def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
@@ -422,7 +496,7 @@ def chat_with_agent(user_message: str, session_id: str = "default") -> str:
             messages.append({"role": turn['role'], "content": turn['content']})
         messages.append({"role": "user", "content": user_message})
 
-        # Agent function calling 실행: messages dict로 직접 넘김!
+        # Agent function calling 실행: messages dict로 직접 넘김
         response = agent.invoke({"messages": messages})
 
         # 응답 처리
@@ -1062,7 +1136,7 @@ async def lifespan(app: FastAPI):
 # 앱 인스턴스 생성, 전역 CORS 허용(데모 편의)
 app = FastAPI(
     title="Chat+RAG+News+Indicators (Function Calling)",
-    lifespan=lifespan  # 이 부분 추가!
+    lifespan=lifespan
 )
 
 app.add_middleware(
