@@ -30,7 +30,7 @@
 
 [yoo-chatbot-v4 개선사항](https://www.notion.so/yoo-chatbot-v4-2bfca2ee78bc80bda0cdde2b06b036ae?pvs=21)
 
-- 기존 v3 + Gemma 2 9B (다른 모델 활용/ GPT-4o-mini 급 sLLM) → Tool Calling 지원x
+- 기존 v3 + Gemma 2 9B (다른 모델 활용/ GPT-4o-mini 급 sLLM) → Tool Calling 지원x → instructor 라이브러리 활용 
 - VectorDB(Qdrant)과 4bit 양자화, LM Studio 시도 → 모델이 기본적으로 양자화 되어 있음.
 
 ### APScheduler로 실시간 뉴스 수집
