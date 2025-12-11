@@ -1601,7 +1601,7 @@ netstat -tlnp | grep 8002               # 포트 사용 확인
 - 🤖 GPT-4o-mini + Function Calling 기반 챗봇
 - ✅ 프론트 엔드 개선, TTS 친화적 개선
 
-### v1.0 (2024-10-15) - 초기 릴리스
+### v1.0 (2024-10-15) - 초기 릴리스 (chatbot-v0.py)
 - 🚀 GPT-5 + Function Calling 기반 챗봇
 - 🔧 MongoDB 뉴스 크롤링 자동화
 - 🎤 STT/TTS 음성 대화 지원
