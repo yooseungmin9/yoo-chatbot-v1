@@ -88,52 +88,25 @@ class ToolRouter:
 
 ## 🧱 시스템 아키텍처
 
-```
-┌─────────────┐
-│   사용자     │  웹 브라우저 (http://localhost:8081/chat)
-└──────┬──────┘
-       │
-       ▼
-┌──────────────────────────────────────────────┐
-│  Spring Boot (8081) - API Gateway           │
-│  - /chat → FastAPI 프록시                    │
-│  - /api/stt, /api/tts, /reset               │
-└──────┬───────────────────────────────────────┘
-       │
-       ▼
-┌──────────────────────────────────────────────┐
-│  FastAPI (8002) - AI 챗봇 서버              │
-│                                              │
-│  ┌────────────────────────────────────┐    │
-│  │ ToolRouter (규칙 기반 패턴 매칭)   │    │
-│  │ - 16개 정규식 패턴                │    │
-│  │ - 100% 도구 선택 정확도            │    │
-│  └────────────────────────────────────┘    │
-│                                              │
-│  ┌────────────────────────────────────┐    │
-│  │ Ollama (Gemma 2 9B)                │    │
-│  │ - 자연어 응답 생성 전용             │    │
-│  └────────────────────────────────────┘    │
-│                                              │
-│  ┌────────────────────────────────────┐    │
-│  │ Data Tools                         │    │
-│  │ - get_latest_news() → MongoDB      │    │
-│  │ - get_market() → PyKRX/yFinance    │    │
-│  │ - get_indicator() → ECOS/FRED      │    │
-│  │ - search_docs() → FAISS RAG        │    │
-│  └────────────────────────────────────┘    │
-└──────┬───────────────────────────────────────┘
-       │
-       ▼
-┌──────────────────────────────────────────────┐
-│  External Services                           │
-│  - MongoDB Atlas (뉴스 데이터)               │
-│  - ECOS API (한국 경제지표)                  │
-│  - FRED API (미국 경제지표)                  │
-│  - PyKRX (한국 주식)                         │
-│  - yFinance (글로벌 주가/환율)               │
-│  - CLOVA STT / Google Cloud TTS             │
-└──────────────────────────────────────────────┘
+```mermaid
+graph TD
+    U["사용자 웹 브라우저"] --> SB["Spring Boot 8081<br>ChatController API Gateway"]
+    SB --> FA["FastAPI 8002<br>chatbot-v4.py"]
+    subgraph "AI Core"
+        TR["ToolRouter<br>정규식 패턴 매칭"]
+        OL["Ollama Gemma 2 9B<br>응답 생성"]
+        RG["RAG (FAISS)<br>문서 검색/임베딩"]
+        CR["crawler_rag.py<br>뉴스 크롤러"]
+        WT["watcher.py<br>문서 감시"]
+    end
+    FA --> TR
+    FA --> OL
+    FA --> RG
+    FA --> CR
+    FA --> WT
+    FA --> MDB["MongoDB Atlas<br>chatbot_rag, latest_news"]
+    FA --> API["External APIs<br>ECOS / FRED / yFinance / PyKRX"]
+    FA --> GC["Google Cloud<br>TTS / CLOVA STT"]
 ```
 
 ---
@@ -276,12 +249,12 @@ $ python3 test_router.py
 
 ## 📈 주요 성과 요약
 
-✅ **AI 챗봇 성능 최적화**: 도구 호출 정확도 70% → 100% (+43%)
-✅ **응답 속도 개선**: 평균 3-5초 → 1-2초 (2~3배 향상)
-✅ **코드 경량화**: LangChain Agent 제거, 300+ 라인 감소
-✅ **테스트 자동화**: 16개 케이스 100% 통과
-✅ **실시간 데이터 연동**: MongoDB, ECOS, FRED, PyKRX, yFinance
-✅ **음성 인터페이스**: STT/TTS 완벽 지원
+✅ **AI 챗봇 성능 최적화**: 도구 호출 정확도 70% → 100% (+43%)  
+✅ **응답 속도 개선**: 평균 3-5초 → 1-2초 (2~3배 향상)  
+✅ **코드 경량화**: LangChain Agent 제거, 300+ 라인 감소  
+✅ **테스트 자동화**: 16개 케이스 100% 통과  
+✅ **실시간 데이터 연동**: MongoDB, ECOS, FRED, PyKRX, yFinance  
+✅ **음성 인터페이스**: STT/TTS 완벽 지원  
 
 ---
 
