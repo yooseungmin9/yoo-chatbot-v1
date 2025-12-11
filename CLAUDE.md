@@ -1580,16 +1580,29 @@ netstat -tlnp | grep 8002               # 포트 사용 확인
 
 ## 버전 히스토리
 
-### v1.1 (2025-12-12) - 규칙 기반 라우팅 최적화
-- ✅ **ToolRouter 클래스 구현**: 정규식 패턴 매칭으로 도구 선택
-- ✅ **LangChain Agent 제거**: 300+ 라인 경량화
-- ✅ **성능 개선**: 도구 호출 정확도 70% → 100%, 응답 속도 2~3배 향상
-- ✅ **PyKRX 통합**: 한국 주식 시세 조회 우선 사용
-- ✅ **테스트 추가**: test_router.py (16개 케이스 100% 통과)
-- 📄 **문서 업데이트**: 규칙 기반 라우팅 섹션 추가 (11장)
+### v1.4 (2025-12-12) - 규칙 기반 라우팅 최적화 (chatbot-v4.py)
+- Gemma 2 9B 모델 적용 (Tool Calling 미지원 모델)
+- ✅ ToolRouter 클래스 구현: 정규식 패턴 매칭으로 도구 선택
+- ✅ LangChain Agent 제거: 300+ 라인 경량화
+- ✅ 성능 개선: 도구 호출 정확도 70% → 100%, 응답 속도 2~3배 향상
+- ✅ PyKRX 통합: 한국 주식 시세 조회 우선 사용
+- ✅ 테스트 추가: test_router.py (16개 케이스 100% 통과)
+- 📄 문서 업데이트: 규칙 기반 라우팅 섹션 추가 (11장)
+
+### v1.3 - 오픈소스 LLM 전환 (chatbot-v3.py)
+- 🔄 LLaMA 3.1 8B 모델 적용
+- ✅ Langchain, Tool Calling 적용
+
+### v1.2 - GPT 파인튜닝 (chatbot-v2.py)
+- 🎯 OpenAI GPT 파인튜닝 버전 -> 실패
+- ✅ GPT-4o-mini + 경제 관련 질답 300개
+
+### v1.1 - OpenAI GPT 기반 (chatbot-v1.py)
+- 🤖 GPT-4o-mini + Function Calling 기반 챗봇
+- ✅ 프론트 엔드 개선, TTS 친화적 개선
 
 ### v1.0 (2024-10-15) - 초기 릴리스
-- 🚀 Gemma 2 9B + LangChain Agent 기반 챗봇
+- 🚀 GPT-5 + Function Calling 기반 챗봇
 - 🔧 MongoDB 뉴스 크롤링 자동화
 - 🎤 STT/TTS 음성 대화 지원
 - 📊 ECOS/FRED/yFinance API 통합
@@ -1597,5 +1610,5 @@ netstat -tlnp | grep 8002               # 포트 사용 확인
 ---
 
 **Last Updated**: 2025-12-12
-**Version**: 1.1
+**Version**: 1.4
 **Author**: 유승민
