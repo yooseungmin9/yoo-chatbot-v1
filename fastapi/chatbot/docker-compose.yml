@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  chatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chatbot-fastapi
+    ports:
+      - "8002:8002"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/key/absolute-text-473306-c1-7db0108e1c22.json
+      - FRED_API_KEY=${FRED_API_KEY}
+      - ECOS_API_KEY=${ECOS_API_KEY}
+      - CLOVA_KEY_ID=${CLOVA_KEY_ID}
+      - CLOVA_KEY=${CLOVA_KEY}
+      - FFMPEG_BIN=/usr/bin/ffmpeg
+    volumes:
+      - ./docs:/app/docs
+      - ./vector_store:/app/vector_store
+      - ./vectorstore:/app/vectorstore
+      - ./key:/app/key:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
