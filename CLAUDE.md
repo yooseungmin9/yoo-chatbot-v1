@@ -43,25 +43,27 @@
 ### 2.1 시스템 아키텍처
 ```mermaid
 graph TD
-    A[사용자 웹 브라우저] --> B[Spring Boot Port 8081]
-    B --> C[FastAPI Port 8002]
-    C --> D[MongoDB Atlas]
-    C --> E[External APIs]
-    C --> F[Google Cloud TTS/STT]
-    
-    subgraph Spring Boot
-    B1[ChatController API Gateway]
+    U[사용자 (웹 브라우저)] --> SB[Spring Boot (8081)\nChatController(API Gateway)]
+    SB --> FA[FastAPI (8002)\nchatbot-v4.py]
+
+    subgraph AI Core
+        TR[ToolRouter\n정규식 패턴 매칭]
+        OL[Ollama Gemma 2 9B\n응답 생성]
+        RG[RAG (FAISS)\n문서 검색/임베딩]
+        CR[crawler_rag.py\n뉴스 크롤러]
+        WT[watcher.py\n문서 감시]
     end
-    
-    subgraph FastAPI
-    C1[chatbot-v4.py]
-    C2[ToolRouter]
-    C3[Ollama Gemma 2 9B]
-    C4[RAG FAISS]
-    C5[crawler_rag.py]
-    C6[watcher.py]
-    end
-```mermaid
+
+    FA --> TR
+    FA --> OL
+    FA --> RG
+    FA --> CR
+    FA --> WT
+
+    FA --> MDB[MongoDB Atlas\nchatbot_rag, latest_news]
+    FA --> API[External APIs\nECOS/FRED/yFinance/PyKRX]
+    FA --> GC[Google Cloud\nTTS/CLOVA STT]
+
 
 ### 2.2 데이터 플로우 (규칙 기반 라우팅)
 
