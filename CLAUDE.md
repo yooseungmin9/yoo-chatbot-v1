@@ -41,6 +41,7 @@
 ## 2. 아키텍처
 
 ### 2.1 시스템 아키텍처
+```
 graph TD
     A[사용자 웹 브라우저] --> B[Spring Boot Port 8081]
     B --> C[FastAPI Port 8002]
@@ -60,6 +61,7 @@ graph TD
     C5[crawler_rag.py]
     C6[watcher.py]
     end
+```
 
 ### 2.2 데이터 플로우 (규칙 기반 라우팅)
 
