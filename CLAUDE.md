@@ -43,15 +43,15 @@
 ### 2.1 시스템 아키텍처
 ```mermaid
 graph TD
-    U["사용자 (웹 브라우저)"] --> SB[Spring Boot (8081)\nChatController(API Gateway)]
-    SB --> FA[FastAPI (8002)\nchatbot-v4.py]
+    U["사용자 웹 브라우저"] --> SB["Spring Boot 8081\nChatController API Gateway"]
+    SB --> FA["FastAPI 8002\nchatbot-v4.py"]
 
-    subgraph AI Core
-        TR[ToolRouter\n"정규식 패턴 매칭"]
-        OL[Ollama Gemma 2 9B\n"응답 생성"]
-        RG[RAG (FAISS)\n"문서 검색/임베딩"]
-        CR[crawler_rag.py\n"뉴스 크롤러"]
-        WT[watcher.py\n"문서 감시"]
+    subgraph "AI Core"
+        TR["ToolRouter\n정규식 패턴 매칭"]
+        OL["Ollama Gemma 2 9B\n응답 생성"]
+        RG["RAG (FAISS)\n문서 검색/임베딩"]
+        CR["crawler_rag.py\n뉴스 크롤러"]
+        WT["watcher.py\n문서 감시"]
     end
 
     FA --> TR
@@ -60,9 +60,9 @@ graph TD
     FA --> CR
     FA --> WT
 
-    FA --> MDB[MongoDB Atlas\nchatbot_rag, latest_news]
-    FA --> API[External APIs\nECOS/FRED/yFinance/PyKRX]
-    FA --> GC[Google Cloud\nTTS/CLOVA STT]
+    FA --> MDB["MongoDB Atlas\nchatbot_rag, latest_news"]
+    FA --> API["External APIs\nECOS / FRED / yFinance / PyKRX"]
+    FA --> GC["Google Cloud\nTTS / CLOVA STT"]
 ```
 
 ### 2.2 데이터 플로우 (규칙 기반 라우팅)
