@@ -63,7 +63,7 @@ graph TD
     FA --> MDB[MongoDB Atlas\nchatbot_rag, latest_news]
     FA --> API[External APIs\nECOS/FRED/yFinance/PyKRX]
     FA --> GC[Google Cloud\nTTS/CLOVA STT]
-
+```
 
 ### 2.2 데이터 플로우 (규칙 기반 라우팅)
 
