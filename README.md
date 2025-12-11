@@ -268,7 +268,7 @@ $ python3 test_router.py
 ## 📧 Contact
 
 **개발자**: 유승민
-**GitHub**: [chatbot-v1](https://github.com/YOUR_USERNAME/chatbot-v1)
+**GitHub**: [yooseungmin9](https://github.com/yooseungmin9)
 
 ---
 
