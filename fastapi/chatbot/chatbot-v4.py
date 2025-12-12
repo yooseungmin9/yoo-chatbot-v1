@@ -72,34 +72,69 @@ def format_kst_human(ts_iso: str) -> str:
 # 답변 톤/형식, 도구 사용 원칙 요약
 SYSTEM_INSTRUCTIONS = """
 # 역할
-경제 뉴스 분석 AI 챗봇. 한국어만 사용. 도구 데이터 = 실시간 100% 신뢰.
+경제 뉴스 분석 AI 챗봇. 
+한국어로 물어보면 한국어만 사용.
+영어로 물어보면 영어만 사용.
 
-# 핵심 규칙
-1. 도구 결과 그대로 전달 (가격/날짜/수치 수정 금지)
-2. 도구 미제공 정보는 답변 불가 (추측/대체 종목 금지)
-3. 면책 문구 금지 ("실시간 아님", "정확하지 않을 수 있음" 등)
+# 핵심 원칙
+- 가격/수치는 **반드시 도구를 호출한 후** 그 결과값만 사용
+- 도구 호출 없이 숫자를 말하면 무조건 오류
+- 아래 예시의 숫자는 형식 참고용이며, 절대 그대로 사용 금지
 
 # 도구 사용
-| 상황 | 도구 |
-|------|------|
-| 종목명/티커 언급 | get_market(market_type="QUOTE", ticker="코드") |
-| 코스피/코스닥/환율 | get_market(market_type="KOSPI/KOSDAQ/USD_KRW") |
-| GDP/금리/CPI | get_indicator(indicator_type="...") |
-| 뉴스 요청 | get_latest_news(count=N) |
-| 사용법 질문 | search_docs(query="...") |
+| 요청 유형 | 도구 |
+|-----------|------|
+| 개별 종목 | get_market(market_type="QUOTE", ticker="종목코드") |
+| 코스피 | get_market(market_type="KOSPI") |
+| 코스닥 | get_market(market_type="KOSDAQ") |
+| 환율 | get_market(market_type="USD_KRW") |
+| 경제지표 | get_indicator(indicator_type="GDP/CPI/RATE") |
+| 뉴스 | get_latest_news(count=N) |
 
-도구 미사용: 인사, 일반 대화, 투자 조언 요청
+# 주요 종목 티커
+- 삼성전자: 005930
+- SK하이닉스: 000660
+- LG전자: 066570
+- 카카오: 035720
+- 네이버: 035420
+- 해외: AAPL, TSLA, NVDA, MSFT, GOOGL
 
-# 에러 처리
-- API 실패: "서버 연결이 지연되고 있습니다. 잠시 후 다시 시도해주세요."
-- 종목 없음: "해당 종목을 찾을 수 없습니다. 종목명을 확인해주세요."
+위 목록에 없는 종목은 사용자에게 티커 확인 요청.
 
-# 답변 형식 (3~5문장)
-- 첫 문장: 핵심 (가격/수치)
-- 중간: 변동률/추가 정보
+# 응답 규칙
+1. 도구 호출 성공 → 받은 값 그대로 전달
+2. 도구 호출 실패 → "조회할 수 없습니다. 잠시 후 다시 시도해 주세요."
+3. 티커 불명확 → "종목코드를 알려주시겠어요?"
+4. 지원 안 되는 요청 → "해당 데이터는 제공되지 않습니다."
+
+# 응답 형식
+- 국내: "삼성전자(005930)의 현재 주가는 XX,XXX원입니다."
+- 해외: "테슬라(TSLA)의 현재 주가는 $XXX.XX입니다."
 - 마지막: "더 궁금한 부분이 있으신가요?"
-- 숫자: 한국 "52,000원" / 해외 "$152.30" / 환율 "1,350.25원"
-- 날짜: "12월 5일 오후 3시" 형식
+
+# 예시
+
+[사용자] 삼성전자 주가
+[행동] get_market 호출 → 결과의 price, change 값 사용
+[응답] 삼성전자(005930)의 현재 주가는 {price}원입니다. 전일 대비 {change}% 변동했네요.
+
+[사용자] 테슬라 얼마야?
+[행동] get_market 호출 → 결과의 price 값 사용
+[응답] 테슬라(TSLA)의 현재 주가는 ${price}입니다.
+
+[사용자] 그 IT 회사 주가
+[행동] 종목 특정 불가 → 도구 호출 안 함
+[응답] 어떤 회사를 말씀하시는 건가요? 종목명을 알려주시면 조회해 드릴게요.
+
+[사용자] 작년 최고가 알려줘
+[행동] 지원하지 않는 데이터 → 도구 호출 안 함
+[응답] 과거 최고가 데이터는 현재 제공되지 않습니다. 현재 주가를 조회해 드릴까요?
+
+# 금지 사항
+- 도구 호출 전에 가격 언급
+- 예시의 숫자(72500, 123.45 등)를 응답에 사용
+- "도구호출:", "도구결과:" 텍스트를 응답에 포함
+- 도구 실패 시 추측으로 대체
 """
 
 
@@ -154,29 +189,115 @@ def get_indicator_wrapper(indicator_type: str) -> dict:
         log.error(f"get_indicator {t} 실패: {e}")
         return {"error": f"{t} 조회 실패: {str(e)}"}
 
-# ===== yfinance/pykrx 시세 조회 유틸 =====
-KOREAN_TICKER_MAP = {
-"삼성전자": "005930.KS",
-"네이버": "035420.KS",
-"SK하이닉스": "000660.KS",
-"삼성바이오로직스": "207940.KS",
-"LG에너지솔루션": "373220.KS",
-"현대차": "005380.KS",
-"기아": "000270.KS",
-"카카오": "035720.KS",
-"포스코": "005490.KS",
-"셀트리온": "068270.KS",
+# ===== 통합 티커 매핑 (종목명 → 티커 변환용) =====
+# 사용자 입력(한글/영문)을 yfinance/pykrx 티커로 변환
+STOCK_TICKER_MAP: Dict[str, str] = {
+    # ===== 한국 대형주 =====
+    "삼성전자": "005930.KS",
+    "네이버": "035420.KS",
+    "NAVER": "035420.KS",
+    "SK하이닉스": "000660.KS",
+    "삼성바이오로직스": "207940.KS",
+    "삼성바이오": "207940.KS",
+    "LG에너지솔루션": "373220.KS",
+    "LG에너지": "373220.KS",
+    "LG": "003550.KS",
+    "현대차": "005380.KS",
+    "현대자동차": "005380.KS",
+    "기아": "000270.KS",
+    "기아차": "000270.KS",
+    "카카오": "035720.KS",
+    "포스코": "005490.KS",
+    "포스코홀딩스": "005490.KS",
+    "셀트리온": "068270.KS",
+    "LG전자": "066570.KS",
+    "현대모비스": "012330.KS",
+    "삼성SDI": "006400.KS",
+    "삼성에스디아이": "006400.KS",
+    "KB금융": "105560.KS",
+    "신한지주": "055550.KS",
+    "하나금융지주": "086790.KS",
+    "삼성물산": "028260.KS",
+    "LG화학": "051910.KS",
+    "한국전력": "015760.KS",
+    "한전": "015760.KS",
+    "SK텔레콤": "017670.KS",
+    "SKT": "017670.KS",
+    "KT": "030200.KS",
+
+    # ===== 미국 빅테크 =====
+    "애플": "AAPL",
+    "apple": "AAPL",
+    "마이크로소프트": "MSFT",
+    "microsoft": "MSFT",
+    "구글": "GOOGL",
+    "google": "GOOGL",
+    "알파벳": "GOOGL",
+    "아마존": "AMZN",
+    "amazon": "AMZN",
+    "메타": "META",
+    "meta": "META",
+    "페이스북": "META",
+    "facebook": "META",
+    "엔비디아": "NVDA",
+    "nvidia": "NVDA",
+    "테슬라": "TSLA",
+    "tesla": "TSLA",
+
+    # ===== 미국 기타 =====
+    "오라클": "ORCL",
+    "oracle": "ORCL",
+    "넷플릭스": "NFLX",
+    "netflix": "NFLX",
+    "디즈니": "DIS",
+    "disney": "DIS",
+    "인텔": "INTC",
+    "intel": "INTC",
+    "AMD": "AMD",
+    "amd": "AMD",
+    "코카콜라": "KO",
+    "맥도날드": "MCD",
+    "나이키": "NKE",
+    "스타벅스": "SBUX",
+    "월마트": "WMT",
+    "코스트코": "COST",
+    "비자": "V",
+    "마스터카드": "MA",
+    "JP모건": "JPM",
+    "뱅크오브아메리카": "BAC",
+    "버크셔": "BRK-B",
+    "버크셔해서웨이": "BRK-B",
+    "존슨앤존슨": "JNJ",
+    "화이자": "PFE",
+    "보잉": "BA",
+    "엑슨모빌": "XOM",
+    "쉐브론": "CVX",
 }
 
-# 티커 자동 변환 유틸
+# 티커 자동 변환 유틸 (통합 STOCK_TICKER_MAP 사용)
 def resolve_ticker(ticker: str) -> str:
-    if ticker.endswith((".KS", ".KQ")):
-        return ticker
-    for name, tkr in KOREAN_TICKER_MAP.items():
-        if name in ticker:
-            log.info(f"자동 변환: '{ticker}' → {tkr}")
+    """종목명/티커를 yfinance/pykrx 호환 형식으로 변환"""
+    ticker_clean = ticker.strip()
+
+    # 이미 티커 형식인 경우
+    if ticker_clean.endswith((".KS", ".KQ")):
+        return ticker_clean
+
+    # 통합 매핑에서 확인
+    for name, tkr in STOCK_TICKER_MAP.items():
+        if name.lower() in ticker_clean.lower():
+            log.info(f"종목 자동 변환: '{ticker}' → {tkr}")
             return tkr
-    return ticker
+
+    # 6자리 숫자 → 한국 주식으로 추정
+    if re.match(r'^\d{6}$', ticker_clean):
+        return f"{ticker_clean}.KS"
+
+    # 영문 대문자 1~5자 → 해외 티커로 추정
+    if re.match(r'^[A-Z]{1,5}$', ticker_clean.upper()):
+        return ticker_clean.upper()
+
+    return ticker_clean
 
 # ===== 규칙 기반 도구 라우터 =====
 class ToolRouter:
@@ -189,15 +310,9 @@ class ToolRouter:
             (r'(최신|최근|오늘|어제).{0,5}뉴스', 'get_latest_news', self._extract_news_params),
             (r'뉴스.{0,5}(\d+)개', 'get_latest_news', self._extract_news_params),
 
-            # 주가 관련 (한국 종목명 우선)
-            (r'(삼성전자|네이버|SK하이닉스|카카오|현대차|기아|LG에너지|포스코|셀트리온).{0,5}주가', 'get_market', self._extract_stock_params),
-            (r'주가.{0,5}(삼성전자|네이버|SK하이닉스|카카오|현대차|기아|LG에너지|포스코|셀트리온)', 'get_market', self._extract_stock_params),
-
-            # 지수 관련
-            (r'코스피', 'get_market', lambda q: {'market_type': 'KOSPI', 'ticker': ''}),
-            (r'코스닥', 'get_market', lambda q: {'market_type': 'KOSDAQ', 'ticker': ''}),
-            (r'KOSPI', 'get_market', lambda q: {'market_type': 'KOSPI', 'ticker': ''}),
-            (r'KOSDAQ', 'get_market', lambda q: {'market_type': 'KOSDAQ', 'ticker': ''}),
+            # 지수 관련 (주가보다 우선 매칭)
+            (r'코스피|KOSPI', 'get_market', lambda q: {'market_type': 'KOSPI', 'ticker': ''}),
+            (r'코스닥|KOSDAQ', 'get_market', lambda q: {'market_type': 'KOSDAQ', 'ticker': ''}),
 
             # 환율 관련
             (r'달러.{0,5}환율|환율.{0,5}달러|원달러', 'get_market', lambda q: {'market_type': 'USD_KRW', 'ticker': ''}),
@@ -212,6 +327,11 @@ class ToolRouter:
             (r'무역수지', 'get_indicator', lambda q: {'indicator_type': 'TRADE_BALANCE'}),
             (r'경상수지', 'get_indicator', lambda q: {'indicator_type': 'CURRENT_ACCOUNT'}),
 
+            # 주가 관련 (범용 패턴 - 모든 주가 질문 캡처)
+            (r'주가|주식.{0,3}(가격|얼마)|stock\s*price|시세', 'get_market', self._extract_stock_params_flexible),
+            # "XX 얼마야?" 패턴 (종목명 + 얼마)
+            (r'.{1,10}(얼마|가격|시세)', 'get_market', self._extract_stock_params_flexible),
+
             # 서비스 도움말
             (r'(사용법|도움말|메뉴얼|가이드|사용방법)', 'search_docs', self._extract_docs_params),
         ]
@@ -223,20 +343,35 @@ class ToolRouter:
         count = max(1, min(20, count))  # 1~20 제한
         return {'count': count}
 
-    def _extract_stock_params(self, query: str) -> dict:
-        """주식 종목명 추출 및 티커 변환"""
-        for name, ticker in KOREAN_TICKER_MAP.items():
-            if name in query:
+    def _extract_stock_params_flexible(self, query: str) -> dict:
+        """주식 종목명 추출 (통합 STOCK_TICKER_MAP 사용)"""
+        query_lower = query.lower()
+
+        # 1. 통합 매핑에서 확인
+        for name, ticker in STOCK_TICKER_MAP.items():
+            if name.lower() in query_lower:
+                log.info(f"패턴 매칭: 종목 '{name}' → {ticker}")
                 return {'market_type': 'QUOTE', 'ticker': ticker}
 
-        # 티커 코드 직접 입력 (예: "005930 주가")
-        match = re.search(r'(\d{6}|[A-Z]{1,5})', query)
+        # 2. 6자리 숫자 티커 (한국 주식)
+        match = re.search(r'(\d{6})', query)
         if match:
-            ticker = match.group(1)
-            if re.match(r'^\d{6}$', ticker):
-                ticker = f"{ticker}.KS"
+            ticker = f"{match.group(1)}.KS"
+            log.info(f"패턴 매칭: 숫자 티커 → {ticker}")
             return {'market_type': 'QUOTE', 'ticker': ticker}
 
+        # 3. 영문 대문자 1~5자 티커 (해외 주식)
+        match = re.search(r'\b([A-Z]{1,5})\b', query.upper())
+        if match:
+            ticker = match.group(1)
+            # 일반 단어 제외
+            excluded = {'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'YOU', 'ALL', 'CAN', 'HAD', 'HER', 'WAS', 'ONE', 'OUR', 'OUT'}
+            if ticker not in excluded:
+                log.info(f"패턴 매칭: 영문 티커 → {ticker}")
+                return {'market_type': 'QUOTE', 'ticker': ticker}
+
+        # 4. 종목 특정 불가 → 빈 티커 반환 (LLM이 사용자에게 확인 요청)
+        log.warning(f"종목 특정 불가: '{query}'")
         return {'market_type': 'QUOTE', 'ticker': ''}
 
     def _extract_docs_params(self, query: str) -> dict:
@@ -269,26 +404,51 @@ def fetch_quote_formatted(ticker: str) -> dict:
     """PyKRX 우선 → yfinance 최소 fallback (LangChain용 숫자 형식)"""
     ticker_code = resolve_ticker(ticker.strip())
     log.info(f"쿼리: {ticker} → {ticker_code}")
-    
-    # 1. 한국 주식: 6자리 코드 → PyKRX
+
+    def _format_output(q: dict, ticker_display: str) -> dict:
+        """조회 결과를 안전하게 포맷팅"""
+        price = q.get('price')
+        if price is None:
+            return {"error": f"{ticker_display} 가격 데이터 없음"}
+
+        change = q.get('change')
+        change_pct = q.get('changePct')
+        # ts_kst 또는 date 필드에서 날짜 추출
+        date_str = q.get('ts_kst') or q.get('date') or datetime.now(KST).strftime("%Y-%m-%d")
+
+        # ISO 형식이면 날짜만 추출
+        if isinstance(date_str, str) and 'T' in date_str:
+            date_str = date_str.split('T')[0]
+
+        # None 값 안전 처리
+        change_str = f"{change:.0f}" if change is not None else "N/A"
+        change_pct_str = f"{change_pct:.2f}" if change_pct is not None else "N/A"
+
+        return {
+            "output": f"price={price}, change={change_str}, changePct={change_pct_str}, date={date_str}"
+        }
+
+    # 1. 한국 주식: 6자리 코드 또는 .KS/.KQ 접미사 → PyKRX
+    krx_code = None
     if re.match(r'^\d{6}$', ticker_code):
-        q = fetch_quote_krx(ticker_code)
-        if q:
-            return {
-                "output": f"price={q['price']}, change={q['change']}, changePct={q['changePct']:.2f}, date={q['date']}"
-            }
-    
+        krx_code = ticker_code
+    elif ticker_code.endswith(('.KS', '.KQ')):
+        krx_code = ticker_code.replace('.KS', '').replace('.KQ', '')
+
+    if krx_code:
+        q = fetch_quote_krx(krx_code)
+        if q and q.get('price') is not None:
+            return _format_output(q, ticker)
+
     # 2. 글로벌 주식/지수: yfinance (ORCL, ^KS11 등)
     yf_ticker = ticker_code
     if re.match(r'^\d{6}$', ticker_code):
         yf_ticker = f"{ticker_code}.KS"  # PyKRX 실패시 yf용
-    
+
     q = fetch_quote_yf(yf_ticker)
-    if q:
-        return {
-            "output": f"price={q['price']}, change={q['change']}, changePct={q['changePct']:.2f}, date={q['date']}"
-        }
-    
+    if q and q.get('price') is not None:
+        return _format_output(q, ticker)
+
     return {"error": f"{ticker} 데이터 없음"}
 
 
@@ -297,7 +457,7 @@ def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
     """시장 데이터 조회 래퍼"""
     try:
         market_type = market_type.strip().upper()
-    
+
         if market_type == "KOSPI":
             return {"output": get_kospi_index()}
         elif market_type == "KOSDAQ":
@@ -311,6 +471,9 @@ def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
         elif market_type == "MARKET_SUMMARY":
             return {"output": f"{get_market_indices()}\n\n{get_fx_rates()}"}
         elif market_type == "QUOTE":
+            # 빈 티커 처리 → 사용자에게 종목명 확인 요청
+            if not ticker or ticker.strip() == "":
+                return {"output": "종목을 특정할 수 없습니다. 종목명이나 티커 코드를 알려주시겠어요? (예: 삼성전자, AAPL, 005930)"}
             return fetch_quote_formatted(ticker)
 
         else:
@@ -373,69 +536,48 @@ llm = ChatOllama(
     num_predict=512,
 )
 
+# 스트리밍용 LLM (별도 인스턴스)
+llm_stream = ChatOllama(
+    model="gemma2:9b",
+    base_url="http://localhost:11434",
+    temperature=0.3,
+    num_ctx=8192,
+    num_predict=512,
+)
+
 # ===== 규칙 기반 채팅 함수 (Gemma 2 9B 최적화) =====
 GREETING_KEYWORDS = ["안녕", "hello", "hi", "반가", "처음", "감사", "반갑", "초보"]
+GREETING_RESPONSE = "안녕하세요! 저는 경제 뉴스와 실시간 경제 지표, 주가 정보를 제공하며, 경제 용어 설명으로 경제 학습을 도와드립니다. 무엇이 궁금하신가요?"
 
-def chat_with_agent(user_message: str, session_id: str = "default") -> str:
-    """규칙 기반 라우팅 + Gemma 2 9B 응답 생성"""
+# 도구 함수 매핑 (공통)
+TOOL_MAP = {
+    'get_latest_news': get_latest_news_wrapper,
+    'get_indicator': get_indicator_wrapper,
+    'get_market': get_market_wrapper,
+    'search_docs': search_docs_wrapper
+}
 
-    # 1. 인사 감지 시 즉시 반환
-    if any(kw in user_message.lower() for kw in GREETING_KEYWORDS):
-        greeting_response = "안녕하세요! 저는 경제 뉴스와 실시간 경제 지표, 주가 정보를 제공하며, 경제 용어 설명으로 경제 학습을 도와드립니다. 무엇이 궁금하신가요?"
-        add_turn(session_id, "user", user_message)
-        add_turn(session_id, "assistant", greeting_response)
-        return greeting_response
 
-    try:
-        # 2. 규칙 기반 라우팅으로 도구 선택
-        route_result = router.route(user_message)
+def _execute_tool(tool_name: str, params: dict) -> dict:
+    """도구 실행 공통 함수"""
+    tool_func = TOOL_MAP.get(tool_name)
+    if not tool_func:
+        return {"error": f"알 수 없는 도구: {tool_name}"}
 
-        if route_result:
-            # 도구 실행
-            tool_name = route_result['tool']
-            params = route_result['params']
+    if tool_name == 'get_latest_news':
+        return tool_func(count=params.get('count', 5))
+    elif tool_name == 'get_indicator':
+        return tool_func(indicator_type=params.get('indicator_type', ''))
+    elif tool_name == 'get_market':
+        return tool_func(market_type=params.get('market_type', ''), ticker=params.get('ticker', ''))
+    elif tool_name == 'search_docs':
+        return tool_func(query=params.get('query', ''))
+    return {"error": "도구 실행 실패"}
 
-            log.info(f"도구 호출: {tool_name}({params})")
 
-            # 도구 함수 매핑
-            tool_map = {
-                'get_latest_news': get_latest_news_wrapper,
-                'get_indicator': get_indicator_wrapper,
-                'get_market': get_market_wrapper,
-                'search_docs': search_docs_wrapper
-            }
-
-            tool_func = tool_map.get(tool_name)
-            if not tool_func:
-                raise ValueError(f"알 수 없는 도구: {tool_name}")
-
-            # 도구 실행 (파라미터 언패킹)
-            if tool_name == 'get_latest_news':
-                tool_result = tool_func(count=params.get('count', 5))
-            elif tool_name == 'get_indicator':
-                tool_result = tool_func(indicator_type=params.get('indicator_type', ''))
-            elif tool_name == 'get_market':
-                tool_result = tool_func(
-                    market_type=params.get('market_type', ''),
-                    ticker=params.get('ticker', '')
-                )
-            elif tool_name == 'search_docs':
-                tool_result = tool_func(query=params.get('query', ''))
-            else:
-                tool_result = {"error": "도구 실행 실패"}
-
-            # 에러 처리
-            if "error" in tool_result:
-                error_msg = tool_result["error"]
-                add_turn(session_id, "user", user_message)
-                add_turn(session_id, "assistant", f"죄송합니다. {error_msg}")
-                return f"죄송합니다. {error_msg}"
-
-            # 3. 도구 결과를 Gemma 2로 자연어 변환
-            tool_output = tool_result.get("output", str(tool_result))
-
-            # 컨텍스트 구성
-            context_prompt = f"""사용자 질문: {user_message}
+def _build_tool_prompt(user_message: str, tool_output: str) -> str:
+    """도구 결과를 자연어로 변환하기 위한 프롬프트 생성"""
+    return f"""사용자 질문: {user_message}
 
 도구 실행 결과:
 {tool_output}
@@ -445,49 +587,59 @@ def chat_with_agent(user_message: str, session_id: str = "default") -> str:
 - 도구 결과의 숫자와 날짜를 그대로 사용 (절대 임의 생성 금지)
 - 마지막에 "더 궁금한 부분이 있으신가요?" 추가"""
 
-            # Gemma 2 호출 (응답 생성만 담당)
+
+def _build_chat_prompt(history: list, user_message: str) -> str:
+    """일반 대화용 프롬프트 생성"""
+    messages = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
+    for turn in history[-10:]:
+        messages.append({"role": turn['role'], "content": turn['content']})
+    messages.append({"role": "user", "content": user_message})
+    return "\n\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+
+
+def chat_with_agent(user_message: str, session_id: str = "default") -> str:
+    """규칙 기반 라우팅 + Gemma 2 9B 응답 생성"""
+
+    # 1. 인사 감지 시 즉시 반환
+    if any(kw in user_message.lower() for kw in GREETING_KEYWORDS):
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", GREETING_RESPONSE)
+        return GREETING_RESPONSE
+
+    try:
+        # 2. 규칙 기반 라우팅으로 도구 선택
+        route_result = router.route(user_message)
+
+        if route_result:
+            # 도구 실행
+            tool_name = route_result['tool']
+            params = route_result['params']
+            log.info(f"도구 호출: {tool_name}({params})")
+
+            tool_result = _execute_tool(tool_name, params)
+
+            # 에러 처리
+            if "error" in tool_result:
+                error_msg = f"죄송합니다. {tool_result['error']}"
+                add_turn(session_id, "user", user_message)
+                add_turn(session_id, "assistant", error_msg)
+                return error_msg
+
+            # 3. 도구 결과를 Gemma 2로 자연어 변환
+            tool_output = tool_result.get("output", str(tool_result))
+            context_prompt = _build_tool_prompt(user_message, tool_output)
             response = llm.invoke(context_prompt)
-
-            # 응답 추출
-            if hasattr(response, "content"):
-                final_answer = response.content
-            else:
-                final_answer = str(response)
-
-            # 세션 저장
-            add_turn(session_id, "user", user_message)
-            add_turn(session_id, "assistant", final_answer)
-
-            return final_answer
-
         else:
             # 4. 일반 대화 (도구 없이 Gemma 2만 사용)
             history = get_session(session_id)
-
-            # 대화 히스토리 구성
-            messages = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
-            for turn in history[-10:]:
-                messages.append({"role": turn['role'], "content": turn['content']})
-            messages.append({"role": "user", "content": user_message})
-
-            # 프롬프트 문자열 생성
-            prompt = "\n\n".join([
-                f"{msg['role']}: {msg['content']}" for msg in messages
-            ])
-
-            # Gemma 2 호출
+            prompt = _build_chat_prompt(history, user_message)
             response = llm.invoke(prompt)
 
-            if hasattr(response, "content"):
-                final_answer = response.content
-            else:
-                final_answer = str(response)
-
-            # 세션 저장
-            add_turn(session_id, "user", user_message)
-            add_turn(session_id, "assistant", final_answer)
-
-            return final_answer
+        # 응답 추출 및 세션 저장
+        final_answer = response.content if hasattr(response, "content") else str(response)
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", final_answer)
+        return final_answer
 
     except Exception as e:
         log.exception("채팅 처리 실패")
@@ -758,62 +910,39 @@ def get_base_rate() -> str:
     return f"**한국은행 기준금리**\\n• 현재 금리: {latest.get('DATA_VALUE','N/A')} (기준: {latest.get('TIME','')})"
 
 # ===== yfinance 유틸 =====
-# 주요 지수/대표주/환율 티커 매핑
+# 주요 지수/원자재/금리 티커 매핑 (개별 종목은 STOCK_TICKER_MAP 사용)
 INDEX_MAP: Dict[str, Dict[str, str]] = {
     # 한국 지수
-    "KOSPI": {"ticker": "^KS11", "name": "코스피"},
+    "KOSPI":  {"ticker": "^KS11", "name": "코스피"},
     "KOSDAQ": {"ticker": "^KQ11", "name": "코스닥"},
 
-    # 한국 대표주
-    "SAMSUNG_ELECTRONICS": {"ticker": "005930.KS", "name": "삼성전자"},
-    "SK_HYNIX":            {"ticker": "000660.KS", "name": "SK하이닉스"},
-    "SAMSUNG_BIO":         {"ticker": "207940.KS", "name": "삼성바이오로직스"},
-    "LG_ENERGY_SOLUTION":  {"ticker": "373220.KS", "name": "LG에너지솔루션"},
-    "LG":                  {"ticker": "003550.KS", "name": "LG"},
-    "HYUNDAI_MOTOR":       {"ticker": "005380.KS", "name": "현대차"},
-    "KIA":                 {"ticker": "000270.KS", "name": "기아"},
-    "NAVER":               {"ticker": "035420.KS", "name": "네이버"},
-    "KAKAO":               {"ticker": "035720.KS", "name": "카카오"},
-    "POSCO_HOLDINGS":      {"ticker": "005490.KS", "name": "포스코"},
-    "CELLTRION":           {"ticker": "068270.KS", "name": "셀트리온"},
-
     # 미국 지수
-    "DOW":       {"ticker": "^DJI",   "name": "다우존스 산업평균"},
-    "SP500":     {"ticker": "^GSPC",  "name": "S&P 500"},
-    "NASDAQ":    {"ticker": "^IXIC",  "name": "나스닥 종합"},
-    "RUSSELL":   {"ticker": "^RUT",   "name": "러셀 2000"},
-    "VIX":       {"ticker": "^VIX",   "name": "VIX 변동성 지수"},
+    "DOW":     {"ticker": "^DJI",  "name": "다우존스 산업평균"},
+    "SP500":   {"ticker": "^GSPC", "name": "S&P 500"},
+    "NASDAQ":  {"ticker": "^IXIC", "name": "나스닥 종합"},
+    "RUSSELL": {"ticker": "^RUT",  "name": "러셀 2000"},
+    "VIX":     {"ticker": "^VIX",  "name": "VIX 변동성 지수"},
 
-    # 미국 대표주
-    "APPLE":       {"ticker": "AAPL",  "name": "Apple"},
-    "MICROSOFT":   {"ticker": "MSFT",  "name": "Microsoft"},
-    "ALPHABET_A":  {"ticker": "GOOGL", "name": "Alphabet A"},
-    "ALPHABET_C":  {"ticker": "GOOG",  "name": "Alphabet C"},
-    "AMAZON":      {"ticker": "AMZN",  "name": "Amazon"},
-    "META":        {"ticker": "META",  "name": "Meta Platforms"},
-    "NVIDIA":      {"ticker": "NVDA",  "name": "NVIDIA"},
-    "TESLA":       {"ticker": "TSLA",  "name": "Tesla"},
-    "BERKSHIRE_B": {"ticker": "BRK-B", "name": "Berkshire Hathaway B"},
-    "JPMORGAN":    {"ticker": "JPM",   "name": "JPMorgan Chase"},
-
-    # 유럽
+    # 유럽 지수
     "EURO_STOXX50": {"ticker": "^STOXX50E", "name": "Euro Stoxx 50"},
     "FTSE100":      {"ticker": "^FTSE",     "name": "FTSE 100"},
     "DAX":          {"ticker": "^GDAXI",    "name": "독일 DAX"},
 
-    # 일본/중국
+    # 아시아 지수
     "NIKKEI225": {"ticker": "^N225",     "name": "니케이 225"},
     "TOPIX":     {"ticker": "^TOPX",     "name": "TOPIX"},
     "SHANGHAI":  {"ticker": "000001.SS", "name": "상하이 종합"},
     "HANG_SENG": {"ticker": "^HSI",      "name": "항셍 지수"},
 
-    # 원자재/금리
+    # 원자재
     "WTI_OIL":   {"ticker": "CL=F", "name": "WTI 원유 선물"},
     "BRENT_OIL": {"ticker": "BZ=F", "name": "브렌트유 선물"},
     "GOLD":      {"ticker": "GC=F", "name": "금 선물"},
     "SILVER":    {"ticker": "SI=F", "name": "은 선물"},
     "COPPER":    {"ticker": "HG=F", "name": "구리 선물"},
-    "US10Y":     {"ticker": "^TNX", "name": "미국 10년물 금리(×10)"},
+
+    # 금리
+    "US10Y": {"ticker": "^TNX", "name": "미국 10년물 금리(×10)"},
 }
 
 FX_MAP: Dict[str, Dict[str, str]] = {
@@ -1133,6 +1262,90 @@ async def chat(payload: dict = Body(...)):
     except Exception:
         log.exception("chat failed")
         return {"answer": "일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요."}
+
+# ===== 스트리밍 챗 엔드포인트 (SSE) =====
+from typing import AsyncGenerator
+
+def _sse_event(chunk: str, done: bool = False) -> str:
+    """SSE 이벤트 포맷 생성"""
+    return f"data: {json.dumps({'chunk': chunk, 'done': done}, ensure_ascii=False)}\n\n"
+
+
+async def stream_chat_response(user_message: str, session_id: str) -> AsyncGenerator[str, None]:
+    """LLM 응답을 스트리밍으로 생성"""
+
+    # 1. 인사 감지 시 즉시 반환
+    if any(kw in user_message.lower() for kw in GREETING_KEYWORDS):
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", GREETING_RESPONSE)
+        yield _sse_event(GREETING_RESPONSE, done=True)
+        return
+
+    try:
+        # 2. 규칙 기반 라우팅으로 도구 선택
+        route_result = router.route(user_message)
+
+        if route_result:
+            # 도구 실행
+            tool_name = route_result['tool']
+            params = route_result['params']
+            log.info(f"[스트리밍] 도구 호출: {tool_name}({params})")
+
+            tool_result = _execute_tool(tool_name, params)
+
+            # 에러 처리
+            if "error" in tool_result:
+                error_msg = f"죄송합니다. {tool_result['error']}"
+                add_turn(session_id, "user", user_message)
+                add_turn(session_id, "assistant", error_msg)
+                yield _sse_event(error_msg, done=True)
+                return
+
+            # 3. 도구 결과를 Gemma 2로 자연어 변환 (스트리밍)
+            tool_output = tool_result.get("output", str(tool_result))
+            prompt = _build_tool_prompt(user_message, tool_output)
+        else:
+            # 4. 일반 대화 (도구 없이 Gemma 2만 사용)
+            history = get_session(session_id)
+            prompt = _build_chat_prompt(history, user_message)
+
+        # 스트리밍 응답 생성
+        full_response = ""
+        async for chunk in llm_stream.astream(prompt):
+            if hasattr(chunk, "content") and chunk.content:
+                full_response += chunk.content
+                yield _sse_event(chunk.content, done=False)
+
+        # 세션 저장
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", full_response)
+        yield _sse_event("", done=True)
+
+    except Exception as e:
+        log.exception("[스트리밍] 채팅 처리 실패")
+        yield _sse_event(f"죄송합니다. 오류가 발생했습니다: {str(e)}", done=True)
+
+
+@app.post("/api/chat/stream")
+@app.post("/chat/stream")
+async def chat_stream(payload: dict = Body(...)):
+    """SSE 스트리밍 챗 엔드포인트"""
+    user_msg = (payload.get("message") or "").strip()
+    session_id = payload.get("session_id", "default")
+
+    if not user_msg:
+        return JSONResponse({"error": "질문이 비어있습니다."}, status_code=400)
+
+    return StreamingResponse(
+        stream_chat_response(user_msg, session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Nginx 버퍼링 비활성화
+        }
+    )
+
 
 # ===== 보조 시세 API =====
 # 지수/환율 묶음 조회(경량 JSON)

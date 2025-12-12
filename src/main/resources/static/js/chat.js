@@ -1,11 +1,16 @@
 // ========== 0) 기본 설정 ==========
-const APP_NAME = "AI 경제질문 챗봇";
-const APP_NAME_US = "AI Economy Q&A Chatbot";
+const APP_NAME = "SUMMARIX";
+const APP_NAME_US = "SUMMARIX Economy Bot";
 const CHAT_URL = "/api/chat";
+// 스트리밍은 FastAPI 직접 호출 (Spring Boot 프록시 미지원)
+const CHAT_STREAM_URL = "http://localhost:8000/api/chat/stream";
 const RESET_URL = "/api/reset";
 const STT_URL = "/api/stt";
 const TTS_URL = "/api/tts";
 const TIMEOUT_MS = 180000;
+
+// 스트리밍 모드 활성화 여부 (false로 설정하면 기존 방식 사용)
+const USE_STREAMING = true;
 
 // i18n
 const I18N = {
@@ -17,7 +22,7 @@ const I18N = {
     btnSend: "전송",
     btnTts: "🔈 답변 듣기",
     inputPh: "질문을 말하거나 입력하세요...",
-    welcome: `안녕하세요! <b>${APP_NAME}</b>입니다. 무엇을 도와드릴까요?`,
+    welcome: `안녕하세요! <b>${APP_NAME}</b>입니다. 경제 뉴스, 실시간 시세, 경제지표를 물어보세요.`,
     statusIdle: "상태: 대기",
     statusTyping: "입력 중...",
     sttStart: "🎤️ 실시간 음성 인식을 시작합니다.",
@@ -34,7 +39,7 @@ const I18N = {
     btnSend: "Send",
     btnTts: "🔈 Read answer",
     inputPh: "Speak or type your question...",
-    welcome: `Hello! This is <b>${APP_NAME_US}</b>. How can I help you today?`,
+    welcome: `Hello! This is <b>${APP_NAME_US}</b>. Ask about economy news, live quotes, and indicators.`,
     statusIdle: "Status: idle",
     statusTyping: "Typing...",
     sttStart: "🎤️ Live speech recognition started.",
@@ -62,8 +67,6 @@ const sttStopBtn = document.getElementById("sttStopBtn");
 const ttsBtn = document.getElementById("ttsBtn");
 const ttsAudio = document.getElementById("ttsAudio");
 
-const typingIndicator = document.getElementById("typingIndicator");
-
 // 다크모드 관련 DOM
 const themeToggleBtn = document.getElementById("themeToggleBtn");
 const themeIcon = themeToggleBtn?.querySelector(".theme-icon");
@@ -73,13 +76,12 @@ let LANG = localStorage.getItem("chat_lang") || (langSelect?.value || "ko-KR");
 // ========== 1-1) 다크모드 초기화 ==========
 function initTheme() {
   const savedTheme = localStorage.getItem("chat_theme") || "light";
-  applyTheme(savedTheme, false); // 애니메이션 없이 즉시 적용
+  applyTheme(savedTheme, false);
 }
 
 function applyTheme(theme, animate = true) {
   const htmlEl = document.documentElement;
 
-  // 애니메이션 제어
   if (!animate) {
     htmlEl.classList.add("no-transition");
   }
@@ -94,7 +96,6 @@ function applyTheme(theme, animate = true) {
 
   localStorage.setItem("chat_theme", theme);
 
-  // 애니메이션 복원
   if (!animate) {
     setTimeout(() => htmlEl.classList.remove("no-transition"), 50);
   }
@@ -107,7 +108,6 @@ function toggleTheme() {
   applyTheme(newTheme, true);
 }
 
-// 다크모드 버튼 이벤트
 themeToggleBtn?.addEventListener("click", toggleTheme);
 
 // ========== 2) 도우미 ==========
@@ -115,7 +115,7 @@ const escapeHtml = (s) => String(s || "").replace(/[&<>"']/g, m => ({ '&': '&amp
 const mdSafe = (text) => escapeHtml(text).replace(/^-\s/gm, "• ").replace(/\n/g, "<br>");
 const scrollToBottom = () => { chatEl.scrollTop = chatEl.scrollHeight; };
 
-// 타이핑 인디케이터 표시 (말풍선 형태로 생성)
+// 타이핑 인디케이터 표시 (말풍선 형태)
 function showTyping() {
   const typingHTML = `
     <div id="typingIndicator" class="message bot-message">
@@ -132,7 +132,6 @@ function showTyping() {
   scrollToBottom();
 }
 
-// 타이핑 인디케이터 제거
 function hideTyping() {
   const indicator = document.getElementById("typingIndicator");
   if (indicator) {
@@ -151,6 +150,44 @@ function bubbleAI(html) {
   chatEl.insertAdjacentHTML("beforeend",
     `<div class="message bot-message"><div class="message-content" data-tts="${escapeHtml(html).replace(/<[^>]+>/g, '')}">${html}</div></div>`);
   scrollToBottom();
+}
+
+// 스트리밍용 AI 버블 생성 (커서 포함)
+function createStreamingBubble() {
+  const bubbleId = `stream-${Date.now()}`;
+  chatEl.insertAdjacentHTML("beforeend",
+    `<div id="${bubbleId}" class="message bot-message">
+      <div class="message-content" data-tts="">
+        <span class="stream-text"></span><span class="streaming-cursor"></span>
+      </div>
+    </div>`);
+  scrollToBottom();
+  return bubbleId;
+}
+
+// 스트리밍 텍스트 업데이트
+function updateStreamingBubble(bubbleId, text) {
+  const bubble = document.getElementById(bubbleId);
+  if (bubble) {
+    const textEl = bubble.querySelector('.stream-text');
+    const contentEl = bubble.querySelector('.message-content');
+    if (textEl) {
+      textEl.innerHTML = mdSafe(text);
+      contentEl.setAttribute('data-tts', text.replace(/<[^>]+>/g, ''));
+    }
+    scrollToBottom();
+  }
+}
+
+// 스트리밍 완료 (커서 제거)
+function finalizeStreamingBubble(bubbleId) {
+  const bubble = document.getElementById(bubbleId);
+  if (bubble) {
+    const cursor = bubble.querySelector('.streaming-cursor');
+    if (cursor) {
+      cursor.remove();
+    }
+  }
 }
 
 function bubbleStatus(text) {
@@ -183,54 +220,126 @@ function renderWelcome() {
   bubbleStatus(I18N[LANG].statusIdle);
 }
 
-// ========== 3) FAQ 즉시 전송 ==========
-function sendQuestion(q) {
+// ========== 3) 스트리밍 질문 전송 ==========
+async function sendQuestionStreaming(q) {
   const text = (q || "").trim();
   if (!text) return;
+
   bubbleUser(text);
   inputEl.value = "";
   sendBtn.disabled = true;
 
-  // 타이핑 인디케이터 표시
+  // 스트리밍 버블 생성
+  const bubbleId = createStreamingBubble();
+  let fullText = "";
+
+  try {
+    const response = await fetch(CHAT_STREAM_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, lang: LANG })
+    });
+
+    if (!response.ok) {
+      updateStreamingBubble(bubbleId, `서버 오류(${response.status})`);
+      finalizeStreamingBubble(bubbleId);
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+
+            if (data.chunk) {
+              fullText += data.chunk;
+              updateStreamingBubble(bubbleId, fullText);
+            }
+
+            if (data.done) {
+              finalizeStreamingBubble(bubbleId);
+            }
+          } catch (e) {
+            // JSON 파싱 오류 무시
+          }
+        }
+      }
+    }
+
+    // 스트리밍 완료
+    finalizeStreamingBubble(bubbleId);
+
+  } catch (err) {
+    updateStreamingBubble(bubbleId, "요청 실패: " + (err?.message || err));
+    finalizeStreamingBubble(bubbleId);
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+// ========== 3-1) 기존 질문 전송 (비스트리밍) ==========
+async function sendQuestionNormal(q) {
+  const text = (q || "").trim();
+  if (!text) return;
+
+  bubbleUser(text);
+  inputEl.value = "";
+  sendBtn.disabled = true;
+
   showTyping();
 
-  (async () => {
-    try {
-      const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort("timeout"), TIMEOUT_MS);
+  try {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort("timeout"), TIMEOUT_MS);
 
-      const res = await fetch(CHAT_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, lang: LANG }),
-        signal: ctrl.signal
-      });
-      clearTimeout(to);
+    const res = await fetch(CHAT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, lang: LANG }),
+      signal: ctrl.signal
+    });
+    clearTimeout(to);
 
-      // 타이핑 인디케이터 숨김
-      hideTyping();
+    hideTyping();
 
-      if (!res.ok) {
-        return bubbleAI(`서버 오류(${res.status})`);
-      }
-      const data = await res.json();
-
-      let answer = data.answer;
-      if (typeof answer === "object") {
-        answer = JSON.stringify(answer);
-      }
-
-      bubbleAI(mdSafe(answer || "응답이 비었습니다."));
-
-    } catch (err) {
-      // 에러 시에도 타이핑 인디케이터 숨김
-      hideTyping();
-      bubbleAI("요청 실패: " + (err?.message || err));
-
-    } finally {
-      sendBtn.disabled = false;
+    if (!res.ok) {
+      return bubbleAI(`서버 오류(${res.status})`);
     }
-  })();
+    const data = await res.json();
+
+    let answer = data.answer;
+    if (typeof answer === "object") {
+      answer = JSON.stringify(answer);
+    }
+
+    bubbleAI(mdSafe(answer || "응답이 비었습니다."));
+
+  } catch (err) {
+    hideTyping();
+    bubbleAI("요청 실패: " + (err?.message || err));
+
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+// 질문 전송 (스트리밍/비스트리밍 선택)
+function sendQuestion(q) {
+  if (USE_STREAMING) {
+    sendQuestionStreaming(q);
+  } else {
+    sendQuestionNormal(q);
+  }
 }
 
 function bindFAQ() {
@@ -243,7 +352,7 @@ function bindFAQ() {
 }
 
 // ========== 4) 초기화 ==========
-initTheme(); // 다크모드 먼저 초기화
+initTheme();
 setLang(LANG);
 renderWelcome();
 bindFAQ();

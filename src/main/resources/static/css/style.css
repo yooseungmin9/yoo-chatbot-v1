@@ -700,3 +700,19 @@ audio {
   transition: none !important;
   }
 }
+
+/* ===== 스트리밍 커서 애니메이션 ===== */
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent-color);
+  margin-left: 2px;
+  animation: blink 0.8s infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}

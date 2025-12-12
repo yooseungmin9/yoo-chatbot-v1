@@ -606,5 +606,3 @@ docker exec chatbot-fastapi ollama pull gemma2:9b
 - [ ] MongoDB 데이터 조회 확인
 - [ ] CloudWatch 로그 수집 확인
 - [ ] 백업 스크립트 동작 확인
-
-축하합니다! 배포가 완료되었습니다! 🎉
