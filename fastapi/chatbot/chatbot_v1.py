@@ -888,6 +888,117 @@ async def chat(payload: dict = Body(...)):
         log.exception("chat failed")
         return {"answer": "일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요."}
 
+# ===== 스트리밍 챗 응답 생성기 =====
+async def stream_chat_response(user_msg: str, session_id: str):
+    """OpenAI 스트리밍 응답 생성기 (SSE 형식)"""
+
+    # "뉴스 최신/Top N" 빠른 경로 처리
+    m = re.search(r"top\s*(\d{1,2})", user_msg, flags=re.IGNORECASE)
+    if "뉴스" in user_msg and ("최신" in user_msg or m):
+        try:
+            n = max(1, min(50, int(m.group(1)))) if m else 5
+            rows = fetch_latest_topn_from_mongo(n)
+            answer = format_topn_md(rows)
+            yield f"data: {json.dumps({'content': answer, 'done': True}, ensure_ascii=False)}\n\n"
+            return
+        except Exception as e:
+            yield f"data: {json.dumps({'content': 'DB 조회 오류. 잠시 후 다시 시도해 주세요.', 'done': True}, ensure_ascii=False)}\n\n"
+            return
+
+    # 세션 히스토리 구성
+    msgs = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
+    for t in get_session(session_id):
+        msgs.append({"role": t["role"], "content": t["content"]})
+    msgs.append({"role": "user", "content": user_msg})
+
+    try:
+        # 1차 응답 (도구 사용 여부 판단) - 스트리밍 없이 먼저 확인
+        comp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=msgs,
+            tools=TOOLS,
+            tool_choice="auto",
+        )
+        msg = comp.choices[0].message
+
+        # 도구 호출이 필요한 경우: 도구 실행 후 스트리밍 응답
+        if getattr(msg, "tool_calls", None):
+            tool_msgs = []
+            for tc in msg.tool_calls:
+                fn = tc.function.name
+                args = json.loads(tc.function.arguments or "{}")
+                result = run_tool(fn, args)
+                tool_msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False)
+                })
+
+            # 도구 결과를 포함한 스트리밍 응답
+            stream = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=msgs + [msg] + tool_msgs,
+                stream=True,
+            )
+
+            full_response = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    yield f"data: {json.dumps({'content': content, 'done': False}, ensure_ascii=False)}\n\n"
+
+            # 세션에 저장
+            add_turn(session_id, "user", user_msg)
+            add_turn(session_id, "assistant", full_response)
+            yield f"data: {json.dumps({'content': '', 'done': True}, ensure_ascii=False)}\n\n"
+
+        else:
+            # 도구 호출 없이 일반 스트리밍 응답
+            stream = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=msgs,
+                stream=True,
+            )
+
+            full_response = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_response += content
+                    yield f"data: {json.dumps({'content': content, 'done': False}, ensure_ascii=False)}\n\n"
+
+            # 세션에 저장
+            add_turn(session_id, "user", user_msg)
+            add_turn(session_id, "assistant", full_response)
+            yield f"data: {json.dumps({'content': '', 'done': True}, ensure_ascii=False)}\n\n"
+
+    except Exception as e:
+        log.exception("streaming chat failed")
+        yield f"data: {json.dumps({'content': '일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.', 'done': True, 'error': str(e)}, ensure_ascii=False)}\n\n"
+
+
+# ===== 스트리밍 챗 엔드포인트 =====
+@app.post("/api/chat/stream")
+@app.post("/chat/stream")
+async def chat_stream(payload: dict = Body(...)):
+    """SSE 스트리밍 챗 엔드포인트"""
+    user_msg = (payload.get("message") or "").strip()
+    session_id = payload.get("session_id", "default")
+
+    if not user_msg:
+        return JSONResponse({"error": "질문이 비어있습니다."}, status_code=400)
+
+    return StreamingResponse(
+        stream_chat_response(user_msg, session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Nginx 버퍼링 비활성화
+        }
+    )
+
 # ===== 보조 시세 API =====
 # 지수/환율 묶음 조회(경량 JSON)
 @app.get("/api/markets")
