@@ -6,12 +6,6 @@
 #    - MongoDB 최신뉴스, ECOS/FRED 경제지표, PyKRX/yfinance 시세, RAG 문서검색
 # 2. STT 파트: CLOVA STT + ffmpeg 전처리
 # 3. TTS 파트: Google Cloud Text-to-Speech
-#
-# ===== 주요 개선사항 (v4 최적화) =====
-# - LangChain Agent 제거 → 규칙 기반 라우팅으로 대체
-# - Gemma 2 9B의 Tool Calling 한계 극복
-# - 응답 속도 2~3배 향상 (Agent 오버헤드 제거)
-# - 도구 호출 정확도 100% (패턴 매칭 기반)
 
 # ===== 환경변수 로드 =====
 from dotenv import load_dotenv
@@ -20,17 +14,20 @@ load_dotenv(override=True)
 # ===== 기본 임포트 =====
 # 표준/서드파티 라이브러리 로드 (FastAPI, Ollama, MongoDB, APScheduler, GCP TTS, yfinance, pandas 등)
 import os, logging, subprocess, io, requests, tempfile, re, shutil, json
+import asyncio
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, UploadFile, File, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import httpx, html
+import aiohttp
 
 from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -55,6 +52,31 @@ log = logging.getLogger("chatbot")
 # ===== 기준시각 포맷 함수 =====
 # KST 타임존 상수
 KST = ZoneInfo("Asia/Seoul")
+
+# ===== 주요 티커 상수 (중복 리터럴 방지) =====
+TICKER_KOSPI = "^KS11"
+TICKER_KOSDAQ = "^KQ11"
+TICKER_DOW = "^DJI"
+TICKER_SP500 = "^GSPC"
+TICKER_NASDAQ = "^IXIC"
+TICKER_USD_KRW = "USDKRW=X"
+TICKER_JPY_KRW = "JPYKRW=X"
+TICKER_EUR_USD = "EURUSD=X"
+
+# ===== 동시성 제어 =====
+# 세마포어: 외부 API 동시 호출 제한
+API_SEMAPHORE = asyncio.Semaphore(10)  # 최대 10개 동시 호출
+YF_SEMAPHORE = asyncio.Semaphore(5)    # yfinance 동시 5개 제한
+KRX_SEMAPHORE = asyncio.Semaphore(3)   # PyKRX 동시 3개 제한 (rate limit 엄격)
+
+# ThreadPoolExecutor: 동기 라이브러리(yfinance, pykrx) 비동기 래핑용
+EXECUTOR = ThreadPoolExecutor(max_workers=10)
+
+# ===== 시세 캐시 (TTL 기반) =====
+# 구조: {ticker: {"data": {...}, "expires_at": datetime}}
+QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
+QUOTE_CACHE_TTL = timedelta(seconds=30)  # 30초 캐시
+QUOTE_CACHE_LOCK = asyncio.Lock()
 
 def format_kst_human(ts_iso: str) -> str:
     """ISO8601 KST 문자열을 '2025년 11월 29일 02시' 형식으로 변환"""
@@ -454,7 +476,7 @@ def fetch_quote_formatted(ticker: str) -> dict:
 
 # ===== yfinance 시세 조회 =====
 def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
-    """시장 데이터 조회 래퍼"""
+    """시장 데이터 조회 래퍼 (동기)"""
     try:
         market_type = market_type.strip().upper()
 
@@ -480,6 +502,114 @@ def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
             return {"error": f"지원하지 않는 시장 타입: {market_type}"}
     except Exception as e:
         return {"error": f"시장 데이터 조회 실패: {str(e)}"}
+
+
+async def get_market_wrapper_async(market_type: str, ticker: str = "") -> dict:
+    """시장 데이터 조회 래퍼 (비동기 - 캐시 활용)"""
+    try:
+        market_type = market_type.strip().upper()
+
+        if market_type == "KOSPI":
+            data = await fetch_quote_cached_async(TICKER_KOSPI)
+            return _format_index_output("코스피", data)
+        elif market_type == "KOSDAQ":
+            data = await fetch_quote_cached_async(TICKER_KOSDAQ)
+            return _format_index_output("코스닥", data)
+        elif market_type == "USD_KRW":
+            data = await fetch_quote_cached_async(TICKER_USD_KRW)
+            return _format_fx_output("달러/원", data)
+        elif market_type == "JPY_KRW":
+            data = await fetch_quote_cached_async(TICKER_JPY_KRW)
+            return _format_fx_output("엔/원", data, multiply=100)
+        elif market_type == "EUR_USD":
+            data = await fetch_quote_cached_async(TICKER_EUR_USD)
+            return _format_fx_output("유로/달러", data)
+        elif market_type == "MARKET_SUMMARY":
+            # 병렬로 모든 지수/환율 조회
+            tickers = [TICKER_KOSPI, TICKER_KOSDAQ, TICKER_DOW, TICKER_SP500, TICKER_USD_KRW, TICKER_JPY_KRW]
+            results = await fetch_quotes_parallel(tickers)
+            return _format_market_summary(results)
+        elif market_type == "QUOTE":
+            if not ticker or ticker.strip() == "":
+                return {"output": "종목을 특정할 수 없습니다. 종목명이나 티커 코드를 알려주시겠어요? (예: 삼성전자, AAPL, 005930)"}
+            # 티커 정규화
+            resolved = resolve_ticker(ticker)
+            data = await fetch_quote_cached_async(resolved)
+            return _format_quote_output(ticker, data)
+        else:
+            return {"error": f"지원하지 않는 시장 타입: {market_type}"}
+    except Exception as e:
+        return {"error": f"시장 데이터 조회 실패: {str(e)}"}
+
+
+def _format_index_output(name: str, data: dict) -> dict:
+    """지수 데이터 포맷팅"""
+    price = data.get("price")
+    if price is None:
+        return {"output": f"**{name} 지수**\n• 현재 데이터를 가져올 수 없습니다."}
+    ch = data.get("change", 0) or 0
+    pct = data.get("changePct", 0) or 0
+    sign = "+" if ch >= 0 else ""
+    return {"output": f"**{name} 지수 (실시간)**\n• 현재가: {price:,.2f}\n• 변동: {sign}{ch:.2f} ({sign}{pct:.2f}%)"}
+
+
+def _format_fx_output(name: str, data: dict, multiply: int = 1) -> dict:
+    """환율 데이터 포맷팅"""
+    price = data.get("price")
+    if price is None:
+        return {"output": f"**{name} 환율**\n• 현재 데이터를 가져올 수 없습니다."}
+    display_price = price * multiply if multiply > 1 else price
+    ch = (data.get("change", 0) or 0) * multiply
+    pct = data.get("changePct", 0) or 0
+    sign = "+" if ch >= 0 else ""
+    unit = "원" if "원" in name else "달러"
+    return {"output": f"**{name} 환율 (실시간)**\n• 현재: {display_price:,.2f}{unit}\n• 변동: {sign}{ch:.2f} ({sign}{pct:.2f}%)"}
+
+
+def _format_quote_output(ticker: str, data: dict) -> dict:
+    """개별 종목 시세 포맷팅"""
+    if data.get("error"):
+        return {"error": data["error"]}
+    price = data.get("price")
+    if price is None:
+        return {"output": f"{ticker} 시세를 가져올 수 없습니다."}
+    ch = data.get("change", 0) or 0
+    pct = data.get("changePct", 0) or 0
+    sign = "+" if ch >= 0 else ""
+    # 원화/달러 구분
+    is_korean = data.get("ticker", "").endswith((".KS", ".KQ"))
+    if is_korean:
+        return {"output": f"**{ticker} 시세 (실시간)**\n• 현재가: {price:,.0f}원\n• 변동: {sign}{ch:,.0f}원 ({sign}{pct:.2f}%)"}
+    else:
+        return {"output": f"**{ticker} 시세 (실시간)**\n• 현재가: ${price:,.2f}\n• 변동: {sign}${ch:.2f} ({sign}{pct:.2f}%)"}
+
+
+def _format_market_summary(results: dict) -> dict:
+    """시장 요약 포맷팅"""
+    lines = ["**📊 시장 요약 (실시간)**\n"]
+
+    # 지수
+    lines.append("**[지수]**")
+    for ticker, name in [(TICKER_KOSPI, "코스피"), (TICKER_KOSDAQ, "코스닥"), (TICKER_DOW, "다우"), (TICKER_SP500, "S&P500")]:
+        data = results.get(ticker, {})
+        price = data.get("price")
+        if price:
+            pct = data.get("changePct", 0) or 0
+            sign = "+" if pct >= 0 else ""
+            lines.append(f"• {name}: {price:,.2f} ({sign}{pct:.2f}%)")
+
+    # 환율
+    lines.append("\n**[환율]**")
+    for ticker, name in [(TICKER_USD_KRW, "달러/원"), (TICKER_JPY_KRW, "엔/원(100)")]:
+        data = results.get(ticker, {})
+        price = data.get("price")
+        if price:
+            display = price * 100 if ticker == TICKER_JPY_KRW else price
+            pct = data.get("changePct", 0) or 0
+            sign = "+" if pct >= 0 else ""
+            lines.append(f"• {name}: {display:,.2f} ({sign}{pct:.2f}%)")
+
+    return {"output": "\n".join(lines)}
 
 # ===== 벡터스토어 초기화 (앱 시작 시 1회) =====
 embeddings = HuggingFaceEmbeddings(
@@ -559,7 +689,7 @@ TOOL_MAP = {
 
 
 def _execute_tool(tool_name: str, params: dict) -> dict:
-    """도구 실행 공통 함수"""
+    """도구 실행 공통 함수 (동기)"""
     tool_func = TOOL_MAP.get(tool_name)
     if not tool_func:
         return {"error": f"알 수 없는 도구: {tool_name}"}
@@ -572,6 +702,47 @@ def _execute_tool(tool_name: str, params: dict) -> dict:
         return tool_func(market_type=params.get('market_type', ''), ticker=params.get('ticker', ''))
     elif tool_name == 'search_docs':
         return tool_func(query=params.get('query', ''))
+    return {"error": "도구 실행 실패"}
+
+
+async def _execute_tool_async(tool_name: str, params: dict) -> dict:
+    """도구 실행 공통 함수 (비동기)
+
+    - get_market: 비동기 함수 직접 호출 (캐시 + 병렬 처리 지원)
+    - 나머지 도구: ThreadPoolExecutor로 비동기 래핑 (MongoDB, ECOS/FRED API, FAISS 검색)
+    """
+    if tool_name not in TOOL_MAP and tool_name != 'get_market':
+        return {"error": f"알 수 없는 도구: {tool_name}"}
+
+    loop = asyncio.get_event_loop()
+
+    if tool_name == 'get_market':
+        # 비동기 시세 조회 (캐시 + 세마포어 적용)
+        return await get_market_wrapper_async(
+            market_type=params.get('market_type', ''),
+            ticker=params.get('ticker', '')
+        )
+    elif tool_name == 'get_latest_news':
+        # MongoDB 조회 - ThreadPoolExecutor로 비동기 래핑
+        async with API_SEMAPHORE:
+            return await loop.run_in_executor(
+                EXECUTOR,
+                lambda: get_latest_news_wrapper(count=params.get('count', 5))
+            )
+    elif tool_name == 'get_indicator':
+        # ECOS/FRED API 조회 - ThreadPoolExecutor로 비동기 래핑
+        async with API_SEMAPHORE:
+            return await loop.run_in_executor(
+                EXECUTOR,
+                lambda: get_indicator_wrapper(indicator_type=params.get('indicator_type', ''))
+            )
+    elif tool_name == 'search_docs':
+        # FAISS 벡터 검색 - ThreadPoolExecutor로 비동기 래핑
+        async with API_SEMAPHORE:
+            return await loop.run_in_executor(
+                EXECUTOR,
+                lambda: search_docs_wrapper(query=params.get('query', ''))
+            )
     return {"error": "도구 실행 실패"}
 
 
@@ -644,6 +815,61 @@ def chat_with_agent(user_message: str, session_id: str = "default") -> str:
     except Exception as e:
         log.exception("채팅 처리 실패")
         return f"죄송합니다. 오류가 발생했습니다: {str(e)}"
+
+
+async def chat_with_agent_async(user_message: str, session_id: str = "default") -> str:
+    """규칙 기반 라우팅 + Gemma 2 9B 응답 생성 (비동기 버전)
+
+    - 도구 실행: _execute_tool_async 사용 (캐시 + 세마포어 적용)
+    - LLM 호출: ThreadPoolExecutor로 비동기 래핑
+    """
+
+    # 1. 인사 감지 시 즉시 반환
+    if any(kw in user_message.lower() for kw in GREETING_KEYWORDS):
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", GREETING_RESPONSE)
+        return GREETING_RESPONSE
+
+    try:
+        # 2. 규칙 기반 라우팅으로 도구 선택
+        route_result = router.route(user_message)
+        loop = asyncio.get_event_loop()
+
+        if route_result:
+            # 도구 실행 (비동기)
+            tool_name = route_result['tool']
+            params = route_result['params']
+            log.info(f"[비동기] 도구 호출: {tool_name}({params})")
+
+            tool_result = await _execute_tool_async(tool_name, params)
+
+            # 에러 처리
+            if "error" in tool_result:
+                error_msg = f"죄송합니다. {tool_result['error']}"
+                add_turn(session_id, "user", user_message)
+                add_turn(session_id, "assistant", error_msg)
+                return error_msg
+
+            # 3. 도구 결과를 Gemma 2로 자연어 변환 (비동기)
+            tool_output = tool_result.get("output", str(tool_result))
+            context_prompt = _build_tool_prompt(user_message, tool_output)
+            response = await loop.run_in_executor(EXECUTOR, llm.invoke, context_prompt)
+        else:
+            # 4. 일반 대화 (도구 없이 Gemma 2만 사용)
+            history = get_session(session_id)
+            prompt = _build_chat_prompt(history, user_message)
+            response = await loop.run_in_executor(EXECUTOR, llm.invoke, prompt)
+
+        # 응답 추출 및 세션 저장
+        final_answer = response.content if hasattr(response, "content") else str(response)
+        add_turn(session_id, "user", user_message)
+        add_turn(session_id, "assistant", final_answer)
+        return final_answer
+
+    except Exception as e:
+        log.exception("[비동기] 채팅 처리 실패")
+        return f"죄송합니다. 오류가 발생했습니다: {str(e)}"
+
 
 # ===== RAG 벡터스토어 ID =====
 # ENV 우선, 없으면 .vector_store_id 파일에서 로드
@@ -913,15 +1139,15 @@ def get_base_rate() -> str:
 # 주요 지수/원자재/금리 티커 매핑 (개별 종목은 STOCK_TICKER_MAP 사용)
 INDEX_MAP: Dict[str, Dict[str, str]] = {
     # 한국 지수
-    "KOSPI":  {"ticker": "^KS11", "name": "코스피"},
-    "KOSDAQ": {"ticker": "^KQ11", "name": "코스닥"},
+    "KOSPI":  {"ticker": TICKER_KOSPI, "name": "코스피"},
+    "KOSDAQ": {"ticker": TICKER_KOSDAQ, "name": "코스닥"},
 
     # 미국 지수
-    "DOW":     {"ticker": "^DJI",  "name": "다우존스 산업평균"},
-    "SP500":   {"ticker": "^GSPC", "name": "S&P 500"},
-    "NASDAQ":  {"ticker": "^IXIC", "name": "나스닥 종합"},
-    "RUSSELL": {"ticker": "^RUT",  "name": "러셀 2000"},
-    "VIX":     {"ticker": "^VIX",  "name": "VIX 변동성 지수"},
+    "DOW":     {"ticker": TICKER_DOW,    "name": "다우존스 산업평균"},
+    "SP500":   {"ticker": TICKER_SP500,  "name": "S&P 500"},
+    "NASDAQ":  {"ticker": TICKER_NASDAQ, "name": "나스닥 종합"},
+    "RUSSELL": {"ticker": "^RUT",        "name": "러셀 2000"},
+    "VIX":     {"ticker": "^VIX",        "name": "VIX 변동성 지수"},
 
     # 유럽 지수
     "EURO_STOXX50": {"ticker": "^STOXX50E", "name": "Euro Stoxx 50"},
@@ -946,15 +1172,15 @@ INDEX_MAP: Dict[str, Dict[str, str]] = {
 }
 
 FX_MAP: Dict[str, Dict[str, str]] = {
-    "USD_KRW": {"ticker": "USDKRW=X", "name": "달러/원"},
-    "JPY_KRW": {"ticker": "JPYKRW=X", "name": "엔/원"},
-    "EUR_USD": {"ticker": "EURUSD=X", "name": "유로/달러"},
-    "CNY_KRW": {"ticker": "CNYKRW=X", "name": "위안/원"},
-    "EUR_KRW": {"ticker": "EURKRW=X", "name": "유로/원"},
-    "JPY_USD": {"ticker": "JPYUSD=X", "name": "엔/달러"},
-    "GBP_USD": {"ticker": "GBPUSD=X", "name": "파운드/달러"},
-    "AUD_USD": {"ticker": "AUDUSD=X", "name": "호주달러/미달러"},
-    "USD_JPY": {"ticker": "USDJPY=X", "name": "달러/엔"},
+    "USD_KRW": {"ticker": TICKER_USD_KRW, "name": "달러/원"},
+    "JPY_KRW": {"ticker": TICKER_JPY_KRW, "name": "엔/원"},
+    "EUR_USD": {"ticker": TICKER_EUR_USD, "name": "유로/달러"},
+    "CNY_KRW": {"ticker": "CNYKRW=X",     "name": "위안/원"},
+    "EUR_KRW": {"ticker": "EURKRW=X",     "name": "유로/원"},
+    "JPY_USD": {"ticker": "JPYUSD=X",     "name": "엔/달러"},
+    "GBP_USD": {"ticker": "GBPUSD=X",     "name": "파운드/달러"},
+    "AUD_USD": {"ticker": "AUDUSD=X",     "name": "호주달러/미달러"},
+    "USD_JPY": {"ticker": "USDJPY=X",     "name": "달러/엔"},
     "USD_CNY": {"ticker": "USDCNY=X", "name": "달러/위안"},
 }
 
@@ -1072,6 +1298,92 @@ def fetch_quote_krx(ticker: str) -> Dict[str, Any]:
         return {"ticker": ticker, "price": None, "error": str(e)}
 
 
+# ===== 비동기 시세 조회 함수 =====
+async def fetch_quote_yf_async(ticker: str) -> Dict[str, Any]:
+    """yfinance 비동기 래핑 (세마포어 + ThreadPool)"""
+    async with YF_SEMAPHORE:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(EXECUTOR, fetch_quote_yf, ticker)
+
+
+async def fetch_quote_krx_async(ticker: str) -> Dict[str, Any]:
+    """PyKRX 비동기 래핑 (세마포어 + ThreadPool)"""
+    async with KRX_SEMAPHORE:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(EXECUTOR, fetch_quote_krx, ticker)
+
+
+async def fetch_quote_cached_async(ticker: str) -> Dict[str, Any]:
+    """TTL 캐시 기반 시세 조회 (비동기)"""
+    now = datetime.now(KST)
+
+    # 캐시 확인
+    async with QUOTE_CACHE_LOCK:
+        if ticker in QUOTE_CACHE:
+            cached = QUOTE_CACHE[ticker]
+            if cached["expires_at"] > now:
+                log.debug(f"캐시 히트: {ticker}")
+                return cached["data"]
+
+    # 캐시 미스 → API 호출
+    is_korean = ticker.endswith((".KS", ".KQ")) or (ticker.isdigit() and len(ticker) == 6)
+
+    if is_korean:
+        # 한국 주식: PyKRX 우선
+        data = await fetch_quote_krx_async(ticker)
+        if data.get("error"):
+            # fallback to yfinance
+            data = await fetch_quote_yf_async(ticker)
+    else:
+        data = await fetch_quote_yf_async(ticker)
+
+    # 캐시 저장
+    async with QUOTE_CACHE_LOCK:
+        QUOTE_CACHE[ticker] = {
+            "data": data,
+            "expires_at": now + QUOTE_CACHE_TTL
+        }
+
+    return data
+
+
+async def fetch_quotes_parallel(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+    """여러 티커 병렬 조회"""
+    tasks = [fetch_quote_cached_async(t) for t in tickers]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    output = {}
+    for ticker, result in zip(tickers, results):
+        if isinstance(result, Exception):
+            output[ticker] = {"ticker": ticker, "error": str(result)}
+        else:
+            output[ticker] = result
+    return output
+
+
+# ===== 백그라운드 캐시 갱신 =====
+async def refresh_cache_background():
+    """주요 시세 백그라운드 갱신 (30초마다)"""
+    # 주요 티커 목록
+    key_tickers = [
+        # 지수
+        TICKER_KOSPI, TICKER_KOSDAQ, TICKER_DOW, TICKER_SP500, TICKER_NASDAQ,
+        # 환율
+        TICKER_USD_KRW, TICKER_JPY_KRW, TICKER_EUR_USD,
+        # 한국 대형주 (상위 5개)
+        "005930.KS", "000660.KS", "035420.KS", "005380.KS", "035720.KS",
+    ]
+
+    while True:
+        try:
+            await fetch_quotes_parallel(key_tickers)
+            log.debug(f"백그라운드 캐시 갱신 완료: {len(key_tickers)}개 티커")
+        except Exception as e:
+            log.warning(f"백그라운드 캐시 갱신 실패: {e}")
+
+        await asyncio.sleep(30)  # 30초 대기
+
+
 def get_market_indices() -> str:
     """주요 지수 동기 조회"""
     results = []
@@ -1106,35 +1418,35 @@ def get_fx_rates() -> str:
 
 def get_kospi_index() -> str:
     # 코스피 단건 포맷
-    q = fetch_quote_yf("^KS11"); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
+    q = fetch_quote_yf(TICKER_KOSPI); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
     if price is None: return "**코스피 지수**\n• 현재 데이터를 가져올 수 없습니다."
     sign = "+" if (ch or 0) >= 0 else ""
     return f"**코스피 지수 (실시간)**\n• 현재가: {price:,.2f}\n• 변동: {sign}{ch if ch is not None else 'N/A'} ({sign}{pct if pct is not None else 'N/A'}%)"
 
 def get_kosdaq_index() -> str:
     # 코스닥 단건 포맷
-    q = fetch_quote_yf("^KQ11"); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
+    q = fetch_quote_yf(TICKER_KOSDAQ); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
     if price is None: return "**코스닥 지수**\n• 현재 데이터를 가져올 수 없습니다."
     sign = "+" if (ch or 0) >= 0 else ""
     return f"**코스닥 지수 (실시간)**\n• 현재가: {price:,.2f}\n• 변동: {sign}{ch if ch is not None else 'N/A'} ({sign}{pct if pct is not None else 'N/A'}%)"
 
 def get_usd_krw() -> str:
     # 달러/원 포맷
-    q = fetch_quote_yf("USDKRW=X"); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
+    q = fetch_quote_yf(TICKER_USD_KRW); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
     if price is None: return "**원/달러 환율**\n• 현재 데이터를 가져올 수 없습니다."
     sign = "+" if (ch or 0) >= 0 else ""
     return f"**원/달러 환율 (실시간)**\n• 현재: {price:,.2f}원\n• 변동: {sign}{(ch or 0):.2f}원 ({sign}{(pct or 0):.2f}%)"
 
 def get_jpy_krw() -> str:
     # 엔/원 포맷
-    q = fetch_quote_yf("JPYKRW=X"); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
+    q = fetch_quote_yf(TICKER_JPY_KRW); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
     if price is None: return "**원/엔 환율**\n• 현재 데이터를 가져올 수 없습니다."
     sign = "+" if (ch or 0) >= 0 else ""
     return f"**원/엔 환율 (실시간)**\n• 현재: {price:,.2f}원\n• 변동: {sign}{(ch or 0):.2f}원 ({sign}{(pct or 0):.2f}%)"
 
 def get_eur_usd() -> str:
     # 유로/달러 포맷
-    q = fetch_quote_yf("EURUSD=X"); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
+    q = fetch_quote_yf(TICKER_EUR_USD); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
     if price is None: return "**유로/달러 환율**\n• 현재 데이터를 가져올 수 없습니다."
     sign = "+" if (ch or 0) >= 0 else ""
     return f"**유로/달러 환율 (실시간)**\n• 현재: {price:,.2f}달러\n• 변동: {sign}{(ch or 0):.2f} ({sign}{(pct or 0):.2f}%)"
@@ -1205,15 +1517,29 @@ async def lifespan(app: FastAPI):
         log.info("APScheduler started.")
     except Exception:
         log.exception("APScheduler 시작 실패")
-    
+
+    # 백그라운드 캐시 갱신 태스크 시작
+    cache_task = asyncio.create_task(refresh_cache_background())
+    log.info("백그라운드 캐시 갱신 태스크 시작")
+
     yield
-    
+
     # ===== Shutdown =====
+    # 백그라운드 태스크 취소
+    cache_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await cache_task
+    log.info("백그라운드 캐시 태스크 종료")
+
     try:
         scheduler.shutdown()
         log.info("APScheduler stopped.")
     except Exception:
         log.exception("APScheduler 종료 실패")
+
+    # ThreadPoolExecutor 종료
+    EXECUTOR.shutdown(wait=False)
+    log.info("ThreadPoolExecutor 종료")
 
 # ===== FastAPI 앱/CORS =====
 # 앱 인스턴스 생성, 전역 CORS 허용(데모 편의)
@@ -1257,7 +1583,8 @@ async def chat(payload: dict = Body(...)):
     msgs.append({"role": "user", "content": user_msg})
 
     try:
-        agent_answer = chat_with_agent(user_msg, session_id)
+        # 비동기 버전 사용 (캐시 + 세마포어 적용)
+        agent_answer = await chat_with_agent_async(user_msg, session_id)
         return {"answer": agent_answer, "session_id": session_id}
     except Exception:
         log.exception("chat failed")
@@ -1286,12 +1613,12 @@ async def stream_chat_response(user_message: str, session_id: str) -> AsyncGener
         route_result = router.route(user_message)
 
         if route_result:
-            # 도구 실행
+            # 도구 실행 (비동기)
             tool_name = route_result['tool']
             params = route_result['params']
             log.info(f"[스트리밍] 도구 호출: {tool_name}({params})")
 
-            tool_result = _execute_tool(tool_name, params)
+            tool_result = await _execute_tool_async(tool_name, params)
 
             # 에러 처리
             if "error" in tool_result:
@@ -1325,7 +1652,6 @@ async def stream_chat_response(user_message: str, session_id: str) -> AsyncGener
         log.exception("[스트리밍] 채팅 처리 실패")
         yield _sse_event(f"죄송합니다. 오류가 발생했습니다: {str(e)}", done=True)
 
-
 @app.post("/api/chat/stream")
 @app.post("/chat/stream")
 async def chat_stream(payload: dict = Body(...)):
@@ -1345,7 +1671,6 @@ async def chat_stream(payload: dict = Body(...)):
             "X-Accel-Buffering": "no",  # Nginx 버퍼링 비활성화
         }
     )
-
 
 # ===== 보조 시세 API =====
 # 지수/환율 묶음 조회(경량 JSON)
@@ -1465,7 +1790,7 @@ def tts_google_post(payload: dict = Body(...)):
     rate = float(payload.get("rate") or 1.0)
     pitch = float(payload.get("pitch") or 0.0)
 
-    # 텍스트 정리 (기존 코드 유지)
+    # 텍스트 정리
     text = html.unescape(text)
     text = re.sub(r'<br\s*/?>', ' ', text)
     text = re.sub(r'<[^>]+>', '', text)   
