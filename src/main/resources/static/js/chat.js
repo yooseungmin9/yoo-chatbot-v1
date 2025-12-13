@@ -261,8 +261,8 @@ async function sendQuestionStreaming(q) {
           try {
             const data = JSON.parse(line.slice(6));
 
-            if (data.chunk) {
-              fullText += data.chunk;
+            if (data.content) {
+              fullText += data.content;
               updateStreamingBubble(bubbleId, fullText);
             }
 
