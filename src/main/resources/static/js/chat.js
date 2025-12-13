@@ -3,7 +3,7 @@ const APP_NAME = "SUMMARIX";
 const APP_NAME_US = "SUMMARIX Economy Bot";
 const CHAT_URL = "/api/chat";
 // 스트리밍은 FastAPI 직접 호출 (Spring Boot 프록시 미지원)
-const CHAT_STREAM_URL = "http://localhost:8002/api/chat/stream";
+const CHAT_STREAM_URL = "/api/chat/stream";
 const RESET_URL = "/api/reset";
 const STT_URL = "/api/stt";
 const TTS_URL = "/api/tts";
@@ -22,7 +22,7 @@ const I18N = {
     btnSend: "전송",
     btnTts: "🔈 답변 듣기",
     inputPh: "질문을 말하거나 입력하세요...",
-    welcome: `안녕하세요! <b>${APP_NAME}</b>입니다.<br>경제 뉴스, 실시간 시세, 경제지표를 물어보세요.`,
+    welcome: `안녕하세요! <b>${APP_NAME}</b>입니다. 경제 뉴스, 실시간 시세, 경제지표를 물어보세요.`,
     statusIdle: "상태: 대기",
     statusTyping: "입력 중...",
     sttStart: "🎤️ 실시간 음성 인식을 시작합니다.",
@@ -39,7 +39,7 @@ const I18N = {
     btnSend: "Send",
     btnTts: "🔈 Read answer",
     inputPh: "Speak or type your question...",
-    welcome: `Hello! This is <b>${APP_NAME_US}</b>.<br>Ask about economy news, live quotes, and indicators.`,
+    welcome: `Hello! This is <b>${APP_NAME_US}</b>. Ask about economy news, live quotes, and indicators.`,
     statusIdle: "Status: idle",
     statusTyping: "Typing...",
     sttStart: "🎤️ Live speech recognition started.",
