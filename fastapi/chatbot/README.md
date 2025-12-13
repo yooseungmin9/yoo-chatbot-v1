@@ -3,7 +3,7 @@
 ```mermaid
 graph TD
     U["사용자 웹 브라우저"] --> SB["Spring Boot 8080<br>ChatController API Gateway"]
-    SB --> FA["FastAPI 8000<br>chatbot-v4.py"]
+    SB --> FA["FastAPI 8002<br>chatbot-v1.py"]
     subgraph "AI Core"
         TR["ToolRouter<br>정규식 패턴 매칭"]
         OL["Ollama Gemma 2 9B<br>응답 생성"]

@@ -3,7 +3,7 @@ const APP_NAME = "SUMMARIX";
 const APP_NAME_US = "SUMMARIX Economy Bot";
 const CHAT_URL = "/api/chat";
 // 스트리밍은 FastAPI 직접 호출 (Spring Boot 프록시 미지원)
-const CHAT_STREAM_URL = "/api/chat/stream";
+const CHAT_STREAM_URL = "http://localhost:8002/api/chat/stream";
 const RESET_URL = "/api/reset";
 const STT_URL = "/api/stt";
 const TTS_URL = "/api/tts";

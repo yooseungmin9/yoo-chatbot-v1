@@ -23,8 +23,8 @@ public class ChatController {
 
     private static final Logger log = Logger.getLogger(ChatController.class.getName());
 
-    // FastAPI 주소 (application.properties: fastapi.url=http://localhost:8000)
-    @Value("${fastapi.chat:http://localhost:8000}")
+    // FastAPI 주소 (application.properties: fastapi.url=http://localhost:8002)
+    @Value("${fastapi.chat:http://localhost:8002}")
     private String FASTAPI_URL;
 
     private static RestTemplate createRestTemplate() {

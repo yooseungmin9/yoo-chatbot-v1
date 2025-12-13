@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 import httpx
 import asyncio
 
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
 from google.cloud import texttospeech
@@ -48,6 +48,12 @@ KST = ZoneInfo("Asia/Seoul")
 # ===== OpenAI =====
 # OPENAI_API_KEY 환경변수 사용, 고정 UA 부여
 client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    default_headers={"User-Agent": "dgict-bot/1.0"}
+)
+
+# 스트리밍용 비동기 클라이언트
+async_client = AsyncOpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     default_headers={"User-Agent": "dgict-bot/1.0"}
 )
@@ -890,7 +896,7 @@ async def chat(payload: dict = Body(...)):
 
 # ===== 스트리밍 챗 응답 생성기 =====
 async def stream_chat_response(user_msg: str, session_id: str):
-    """OpenAI 스트리밍 응답 생성기 (SSE 형식)"""
+    """OpenAI 비동기 스트리밍 응답 생성기 (SSE 형식)"""
 
     # "뉴스 최신/Top N" 빠른 경로 처리
     m = re.search(r"top\s*(\d{1,2})", user_msg, flags=re.IGNORECASE)
@@ -912,8 +918,8 @@ async def stream_chat_response(user_msg: str, session_id: str):
     msgs.append({"role": "user", "content": user_msg})
 
     try:
-        # 1차 응답 (도구 사용 여부 판단) - 스트리밍 없이 먼저 확인
-        comp = client.chat.completions.create(
+        # 1차 응답 (도구 사용 여부 판단) - 비동기 호출
+        comp = await async_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=msgs,
             tools=TOOLS,
@@ -934,15 +940,15 @@ async def stream_chat_response(user_msg: str, session_id: str):
                     "content": json.dumps(result, ensure_ascii=False)
                 })
 
-            # 도구 결과를 포함한 스트리밍 응답
-            stream = client.chat.completions.create(
+            # 도구 결과를 포함한 비동기 스트리밍 응답
+            stream = await async_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=msgs + [msg] + tool_msgs,
                 stream=True,
             )
 
             full_response = ""
-            for chunk in stream:
+            async for chunk in stream:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     full_response += content
@@ -954,15 +960,15 @@ async def stream_chat_response(user_msg: str, session_id: str):
             yield f"data: {json.dumps({'content': '', 'done': True}, ensure_ascii=False)}\n\n"
 
         else:
-            # 도구 호출 없이 일반 스트리밍 응답
-            stream = client.chat.completions.create(
+            # 도구 호출 없이 일반 비동기 스트리밍 응답
+            stream = await async_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=msgs,
                 stream=True,
             )
 
             full_response = ""
-            for chunk in stream:
+            async for chunk in stream:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     full_response += content
