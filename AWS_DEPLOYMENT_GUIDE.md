@@ -39,7 +39,7 @@ Application Load Balancer (ALB) + SSL/TLS
 ## 2. 사전 준비사항
 
 ### 2.1 AWS 계정 및 권한
-- AWS 계정 생성 (아직 없는 경우)
+- AWS 계정 생성
 - IAM 사용자 생성 및 다음 권한 부여:
   - EC2FullAccess
   - ElasticLoadBalancingFullAccess
@@ -49,20 +49,9 @@ Application Load Balancer (ALB) + SSL/TLS
 ### 2.2 도메인 설정
 도메인 `www.yooseungmin.com`이 어디서 구입되었는지에 따라:
 
-**Option A: AWS Route 53에서 구입한 경우**
-- 이미 Route 53 Hosted Zone이 생성되어 있음
-- 바로 3단계로 진행
-
-**Option B: 외부 도메인 등록업체 (Gabia, Cafe24, GoDaddy 등)**
+**Option B: 외부 도메인 등록업체 (Gabia)**
 1. AWS Route 53에서 Hosted Zone 생성
-2. 외부 등록업체에서 네임서버를 AWS Route 53의 NS 레코드로 변경
-   ```
-   예시 AWS NS 레코드:
-   ns-123.awsdns-12.com
-   ns-456.awsdns-34.net
-   ns-789.awsdns-56.org
-   ns-012.awsdns-78.co.uk
-   ```
+2. Gabia에서 네임서버를 AWS Route 53의 NS 레코드로 변경
 
 ### 2.3 로컬 환경 확인
 ```bash
@@ -157,7 +146,7 @@ docker-compose --version
 
 ### 4.1 코드 업로드
 
-**Option A: Git을 통한 배포 (추천)**
+**Option A: Git을 통한 배포**
 
 ```bash
 # EC2에서 실행
@@ -194,8 +183,6 @@ CLOVA_KEY_ID=your_clova_key_id
 CLOVA_KEY=your_clova_key
 FFMPEG_BIN=/usr/bin/ffmpeg
 ```
-
-**중요: Google Cloud 인증 파일 업로드**
 
 ```bash
 # 로컬 Mac에서 실행
@@ -594,15 +581,3 @@ docker exec chatbot-fastapi ollama list
 docker exec chatbot-fastapi ollama ps
 docker exec chatbot-fastapi ollama pull gemma2:9b
 ```
-
----
-
-**배포 완료 후 확인사항:**
-- [ ] https://www.yooseungmin.com 접속 확인
-- [ ] SSL 인증서 정상 동작 (자물쇠 아이콘)
-- [ ] Health check 엔드포인트 정상 응답
-- [ ] 챗봇 기능 테스트
-- [ ] STT/TTS 기능 테스트
-- [ ] MongoDB 데이터 조회 확인
-- [ ] CloudWatch 로그 수집 확인
-- [ ] 백업 스크립트 동작 확인
