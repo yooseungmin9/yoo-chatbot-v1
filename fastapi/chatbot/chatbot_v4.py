@@ -87,7 +87,7 @@ def format_kst_human(ts_iso: str) -> str:
         return ts_iso  # 실패하면 원문 그대로
 
 # =============================================================
-# CHATBOT (RAG + 뉴스 + 지표 + 시세 + Lnagchain + 세션/라우트)
+# CHATBOT (RAG + 뉴스 + 지표 + 시세 + Langchain + 세션/라우트)
 # =============================================================
 
 # ===== 시스템 프롬프트 =====
@@ -883,10 +883,10 @@ else:
     log.info(f"VectorStore ID: {VS_ID}")
 
 # ===== MongoDB =====
-# 연결정보/DB/컬렉션 상수
-MONGO_URI = "mongodb://localhost:27017"
-DB_NAME = "local"
-COLL_NAME = "chatbot1_rag"
+# 연결정보/DB/컬렉션 상수 (환경변수 우선, 기본값 fallback)
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("MONGO_DB_NAME", "local")
+COLL_NAME = os.getenv("MONGO_COLL_NAME", "chatbot1_rag")
 
 _mongo_client = None
 
@@ -937,11 +937,9 @@ def format_topn_md(rows):
     """뉴스 목록을 TTS 친화적인 자연스러운 문장으로 변환"""
     if not rows:
         return "현재 최신 경제 뉴스가 없습니다."
-    
-    # 오늘 날짜
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    today = datetime.now(ZoneInfo("Asia/Seoul"))
+
+    # 오늘 날짜 (상단에서 import한 datetime, KST 사용)
+    today = datetime.now(KST)
     date_readable = f"{today.month}월 {today.day}일"
     
     out = [f"{date_readable} 최신 경제 뉴스를 알려드리겠습니다.\n"]
@@ -1133,7 +1131,7 @@ def get_base_rate() -> str:
     res = fetch_ecos_stat_by_code("901Y001")
     if "error" in res: return f"기준금리 조회 실패: {res['error']}"
     latest = res["data"][-1]
-    return f"**한국은행 기준금리**\\n• 현재 금리: {latest.get('DATA_VALUE','N/A')} (기준: {latest.get('TIME','')})"
+    return f"**한국은행 기준금리**\n• 현재 금리: {latest.get('DATA_VALUE','N/A')} (기준: {latest.get('TIME','')})"
 
 # ===== yfinance 유틸 =====
 # 주요 지수/원자재/금리 티커 매핑 (개별 종목은 STOCK_TICKER_MAP 사용)
@@ -1776,10 +1774,8 @@ def _pick_voice(lang: str, voice: Optional[str]) -> str:
     return DEFAULT_VOICE.get(base, "ko-KR-Neural2-B")
 
 # 텍스트 → 오디오 변환 (MP3/OGG_OPUS/WAV)
-from google.cloud import texttospeech
+# (texttospeech, service_account는 상단에서 import 완료)
 from google.oauth2 import service_account
-import google.auth
-import os
 
 @app.post("/api/tts")
 def tts_google_post(payload: dict = Body(...)):
