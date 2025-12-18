@@ -11,11 +11,16 @@
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+# ===== Pydantic Settings =====
+from config import settings
+
 # ===== 기본 임포트 =====
 # 표준/서드파티 라이브러리 로드 (FastAPI, Ollama, MongoDB, APScheduler, GCP TTS, yfinance, pandas 등)
-import os, logging, subprocess, io, requests, tempfile, re, shutil, json
+import os, logging, subprocess, io, requests, tempfile, re, json
 import asyncio
-from typing import Dict, Any, List, Optional
+import threading
+from typing import Dict, Any, List, Optional, Union
+from pydantic import BaseModel, Field
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
@@ -44,10 +49,109 @@ from langchain_community.document_loaders import DirectoryLoader, UnstructuredWo
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# ===== 로깅 =====
-# 전역 로거 설정 (레벨/포맷)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("chatbot")
+# ===== 구조화된 로깅 =====
+import uuid
+from contextvars import ContextVar
+
+# 요청별 컨텍스트 변수 (request_id, session_id 추적)
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+session_id_var: ContextVar[str] = ContextVar("session_id", default="-")
+
+class StructuredJsonFormatter(logging.Formatter):
+    """JSON 포맷 로그 포매터 (구조화된 로깅)"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_data = {
+            "timestamp": datetime.now(KST).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": request_id_var.get(),
+            "session_id": session_id_var.get(),
+        }
+
+        # 추가 필드 (extra로 전달된 값)
+        if hasattr(record, "extra_data"):
+            log_data.update(record.extra_data)
+
+        # 예외 정보 추가
+        if record.exc_info:
+            log_data["exception"] = self.formatException(record.exc_info)
+
+        # 소스 위치 (디버그용)
+        if record.levelno >= logging.WARNING:
+            log_data["location"] = f"{record.filename}:{record.lineno}"
+
+        return json.dumps(log_data, ensure_ascii=False, default=str)
+
+class StructuredLogger:
+    """구조화된 로거 래퍼 클래스"""
+
+    def __init__(self, name: str = "chatbot"):
+        self._logger = logging.getLogger(name)
+
+    def _log(self, level: int, message: str, **kwargs):
+        """추가 데이터와 함께 로그 기록"""
+        extra = {"extra_data": kwargs} if kwargs else {}
+        self._logger.log(level, message, extra=extra)
+
+    def debug(self, message: str, **kwargs):
+        self._log(logging.DEBUG, message, **kwargs)
+
+    def info(self, message: str, **kwargs):
+        self._log(logging.INFO, message, **kwargs)
+
+    def warning(self, message: str, **kwargs):
+        self._log(logging.WARNING, message, **kwargs)
+
+    def error(self, message: str, **kwargs):
+        self._log(logging.ERROR, message, **kwargs)
+
+    def exception(self, message: str, **kwargs):
+        """예외 정보와 함께 에러 로그"""
+        extra = {"extra_data": kwargs} if kwargs else {}
+        self._logger.exception(message, extra=extra)
+
+
+def setup_logging(json_format: bool = True, level: int = logging.INFO):
+    """로깅 설정 초기화
+
+    Args:
+        json_format: True면 JSON 포맷, False면 텍스트 포맷
+        level: 로그 레벨
+    """
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # 기존 핸들러 제거
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # 콘솔 핸들러 추가
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+
+    if json_format:
+        console_handler.setFormatter(StructuredJsonFormatter())
+    else:
+        # 개발용 텍스트 포맷
+        text_format = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+        console_handler.setFormatter(logging.Formatter(text_format))
+
+    root_logger.addHandler(console_handler)
+
+    # 외부 라이브러리 로그 레벨 조정
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("pymongo").setLevel(logging.WARNING)
+
+# 환경변수로 JSON 로깅 여부 결정 (개발: False, 운영: True)
+_USE_JSON_LOGGING = os.environ.get("LOG_FORMAT", "json").lower() == "json"
+setup_logging(json_format=_USE_JSON_LOGGING, level=logging.INFO)
+
+# 구조화된 로거 인스턴스
+log = StructuredLogger("chatbot")
 
 # ===== 기준시각 포맷 함수 =====
 # KST 타임존 상수
@@ -63,20 +167,141 @@ TICKER_USD_KRW = "USDKRW=X"
 TICKER_JPY_KRW = "JPYKRW=X"
 TICKER_EUR_USD = "EURUSD=X"
 
+# ===== 매직 넘버 상수 정의 =====
+# 동시성 제어
+MAX_API_CONCURRENT = 10          # 외부 API 최대 동시 호출 수
+MAX_YF_CONCURRENT = 5            # yfinance 최대 동시 호출 수
+MAX_KRX_CONCURRENT = 3           # PyKRX 최대 동시 호출 수 (rate limit 엄격)
+MAX_OLLAMA_CONCURRENT = 3        # Ollama LLM 최대 동시 호출 수 (GPU 메모리 보호)
+MAX_THREAD_WORKERS = 10          # ThreadPoolExecutor 워커 수
+
+# 타임아웃 (초)
+LLM_TIMEOUT_SECONDS = 60         # LLM 응답 타임아웃
+HTTP_TIMEOUT_SECONDS = 30        # HTTP 요청 타임아웃
+FRED_TIMEOUT_SECONDS = 20        # FRED API 타임아웃
+ECOS_TIMEOUT_SECONDS = 30        # ECOS API 타임아웃
+STT_TIMEOUT_SECONDS = 60         # STT API 타임아웃
+
+# 캐시
+QUOTE_CACHE_TTL_SECONDS = 30     # 시세 캐시 TTL (초)
+CACHE_REFRESH_INTERVAL = 30      # 백그라운드 캐시 갱신 간격 (초)
+LRU_CACHE_SIZE = 1000            # LRU 캐시 최대 크기
+
+# 세션
+MAX_SESSION_TURNS = 20           # 세션당 최대 대화 턴 수
+MAX_HISTORY_TURNS = 10           # LLM 컨텍스트에 포함할 최대 히스토리 턴
+
+# 뉴스
+DEFAULT_NEWS_COUNT = 5           # 기본 뉴스 조회 개수
+MAX_NEWS_COUNT = 50              # 최대 뉴스 조회 개수
+MIN_NEWS_COUNT = 1               # 최소 뉴스 조회 개수
+NEWS_ROUTER_MAX_COUNT = 20       # 라우터에서 제한하는 최대 뉴스 개수
+
+# LLM 설정
+LLM_NUM_CTX = 8192               # Gemma 2 컨텍스트 크기
+LLM_NUM_PREDICT = 512            # 최대 생성 토큰 수
+LLM_TEMPERATURE = 0.3            # LLM 온도 (창의성)
+OLLAMA_BASE_URL = "http://localhost:11434"
+
+# RAG 설정
+RAG_CHUNK_SIZE = 500             # 문서 청크 크기
+RAG_CHUNK_OVERLAP = 50           # 청크 오버랩
+RAG_TOP_K = 3                    # 검색 결과 개수
+RAG_CONTEXT_MAX_CHARS = 200      # 컨텍스트 문서 최대 길이
+
+# MongoDB
+MONGO_MAX_POOL_SIZE = 50         # 최대 연결 풀 크기
+MONGO_MIN_POOL_SIZE = 10         # 최소 연결 풀 크기
+MONGO_TIMEOUT_MS = 3000          # 서버 선택 타임아웃 (밀리초)
+
+# 데이터 조회 기간 (일)
+FRED_LOOKBACK_DAYS = 90          # FRED 데이터 조회 기간
+ECOS_LOOKBACK_DAYS = 365         # ECOS 데이터 조회 기간
+TRADE_LOOKBACK_DAYS = 730        # 무역 데이터 조회 기간 (2년)
+
+# 숫자 검증
+SUSPICIOUS_NUMBER_THRESHOLD = 1000  # 의심 숫자 임계값
+NUMBER_TOLERANCE = 0.01          # 숫자 비교 허용 오차
+
+# 스케줄러
+CRAWLER_INTERVAL_MINUTES = 10    # 뉴스 크롤러 실행 간격 (분)
+CRAWLER_LIMIT_PER_RUN = 10       # 크롤러 1회 실행당 수집 개수
+MISFIRE_GRACE_TIME = 60          # 스케줄러 미스파이어 허용 시간 (초)
+
+# 환율 배율
+JPY_MULTIPLY = 100               # 엔화 표시 배율 (100엔 기준)
+
 # ===== 동시성 제어 =====
 # 세마포어: 외부 API 동시 호출 제한
-API_SEMAPHORE = asyncio.Semaphore(10)  # 최대 10개 동시 호출
-YF_SEMAPHORE = asyncio.Semaphore(5)    # yfinance 동시 5개 제한
-KRX_SEMAPHORE = asyncio.Semaphore(3)   # PyKRX 동시 3개 제한 (rate limit 엄격)
+API_SEMAPHORE = asyncio.Semaphore(MAX_API_CONCURRENT)
+YF_SEMAPHORE = asyncio.Semaphore(MAX_YF_CONCURRENT)
+KRX_SEMAPHORE = asyncio.Semaphore(MAX_KRX_CONCURRENT)
+OLLAMA_SEMAPHORE = asyncio.Semaphore(MAX_OLLAMA_CONCURRENT)
 
 # ThreadPoolExecutor: 동기 라이브러리(yfinance, pykrx) 비동기 래핑용
-EXECUTOR = ThreadPoolExecutor(max_workers=10)
+EXECUTOR = ThreadPoolExecutor(max_workers=MAX_THREAD_WORKERS)
 
 # ===== 시세 캐시 (TTL 기반) =====
 # 구조: {ticker: {"data": {...}, "expires_at": datetime}}
 QUOTE_CACHE: Dict[str, Dict[str, Any]] = {}
-QUOTE_CACHE_TTL = timedelta(seconds=30)  # 30초 캐시
+QUOTE_CACHE_TTL = timedelta(seconds=QUOTE_CACHE_TTL_SECONDS)
 QUOTE_CACHE_LOCK = asyncio.Lock()
+
+# ===== 세션 매니저 (Thread-Safe) =====
+class SessionManager:
+    """Thread-Safe 세션 관리자
+
+    - Lock을 사용하여 동시 접근 시 Race Condition 방지
+    - 세션별 최대 턴 수 제한 (메모리 관리)
+    """
+
+    def __init__(self, max_turns: int = MAX_SESSION_TURNS):
+        self._sessions: Dict[str, List[Dict[str, str]]] = {}
+        self._lock = threading.Lock()
+        self._max_turns = max_turns
+
+    def get(self, session_id: str) -> List[Dict[str, str]]:
+        """세션 조회 (없으면 생성)"""
+        with self._lock:
+            if session_id not in self._sessions:
+                self._sessions[session_id] = []
+            # 복사본 반환 (외부 수정 방지)
+            return list(self._sessions[session_id])
+
+    def add_turn(self, session_id: str, role: str, content: str) -> None:
+        """대화 턴 추가"""
+        with self._lock:
+            if session_id not in self._sessions:
+                self._sessions[session_id] = []
+            self._sessions[session_id].append({"role": role, "content": content})
+            # 최대 턴 수 제한
+            if len(self._sessions[session_id]) > 2 * self._max_turns:
+                self._sessions[session_id] = self._sessions[session_id][-2 * self._max_turns:]
+
+    def clear(self, session_id: str = None) -> None:
+        """세션 초기화 (session_id 없으면 전체 초기화)"""
+        with self._lock:
+            if session_id:
+                self._sessions.pop(session_id, None)
+            else:
+                self._sessions.clear()
+
+    def count(self) -> int:
+        """현재 세션 수"""
+        with self._lock:
+            return len(self._sessions)
+
+# 싱글톤 인스턴스
+session_manager = SessionManager(max_turns=MAX_SESSION_TURNS)
+
+# 하위 호환성을 위한 래퍼 함수
+def get_session(session_id: str) -> List[Dict[str, str]]:
+    """세션 조회 (하위 호환성)"""
+    return session_manager.get(session_id)
+
+def add_turn(session_id: str, role: str, content: str) -> None:
+    """대화 턴 추가 (하위 호환성)"""
+    session_manager.add_turn(session_id, role, content)
 
 def format_kst_human(ts_iso: str) -> str:
     """ISO8601 KST 문자열을 '2025년 11월 29일 02시' 형식으로 변환"""
@@ -86,85 +311,165 @@ def format_kst_human(ts_iso: str) -> str:
     except Exception:
         return ts_iso  # 실패하면 원문 그대로
 
+# ===== Pydantic 모델 정의 =====
+
+# === Request 모델 ===
+class ChatRequest(BaseModel):
+    """채팅 요청 모델"""
+    message: str = Field(..., min_length=1, description="사용자 메시지")
+    session_id: str = Field(default="default", description="세션 ID")
+
+class TTSRequest(BaseModel):
+    """TTS 요청 모델"""
+    text: str = Field(..., min_length=1, description="음성 변환할 텍스트")
+    lang: str = Field(default="ko-KR", description="언어 코드")
+    voice: Optional[str] = Field(default=None, description="음성 종류")
+
+class ResetRequest(BaseModel):
+    """세션 리셋 요청 모델"""
+    session_id: Optional[str] = Field(default=None, description="리셋할 세션 ID (없으면 전체)")
+
+# === Response 모델 ===
+class ToolResult(BaseModel):
+    """도구 실행 결과 (일관된 반환 타입)"""
+    output: Optional[str] = Field(default=None, description="성공 시 출력")
+    error: Optional[str] = Field(default=None, description="에러 메시지")
+    data: Optional[Dict[str, Any]] = Field(default=None, description="원본 데이터")
+
+    @property
+    def is_success(self) -> bool:
+        return self.error is None and self.output is not None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """dict 변환 (하위 호환성)"""
+        if self.error:
+            return {"error": self.error}
+        return {"output": self.output} if self.output else {"error": "데이터 없음"}
+
+class ChatResponse(BaseModel):
+    """채팅 응답 모델"""
+    answer: str = Field(..., description="챗봇 응답")
+    session_id: str = Field(default="default", description="세션 ID")
+    error: Optional[str] = Field(default=None, description="에러 메시지")
+
+class HealthResponse(BaseModel):
+    """헬스체크 응답 모델"""
+    status: str = Field(default="ok", description="서버 상태")
+    ts_kst: str = Field(..., description="서버 시각 (KST)")
+
+class QuoteData(BaseModel):
+    """시세 데이터 모델"""
+    price: Optional[float] = Field(default=None, description="현재가")
+    change: Optional[float] = Field(default=None, description="변동액")
+    changePct: Optional[float] = Field(default=None, description="변동률 (%)")
+    volume: Optional[int] = Field(default=None, description="거래량")
+    ticker: Optional[str] = Field(default=None, description="티커 코드")
+    ts_kst: Optional[str] = Field(default=None, description="조회 시각")
+
+    def get_change_safe(self) -> float:
+        """변동액 안전 조회 (None이면 0)"""
+        return self.change if self.change is not None else 0.0
+
+    def get_change_pct_safe(self) -> float:
+        """변동률 안전 조회 (None이면 0)"""
+        return self.changePct if self.changePct is not None else 0.0
+
+# === 헬퍼 함수 ===
+def make_tool_result(output: str = None, error: str = None, data: dict = None) -> ToolResult:
+    """ToolResult 생성 헬퍼"""
+    return ToolResult(output=output, error=error, data=data)
+
+def make_success(output: str, data: dict = None) -> Dict[str, Any]:
+    """성공 결과 dict 생성 (하위 호환성)"""
+    return {"output": output, "data": data} if data else {"output": output}
+
+def make_error(error: str) -> Dict[str, Any]:
+    """에러 결과 dict 생성 (하위 호환성)"""
+    return {"error": error}
+
+def _get_safe_float(data: Dict[str, Any], key: str, default: float = 0.0) -> float:
+    """dict에서 안전하게 float 값 조회 (None 처리)"""
+    value = data.get(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _get_safe_int(data: Dict[str, Any], key: str, default: int = 0) -> int:
+    """dict에서 안전하게 int 값 조회 (None 처리)"""
+    value = data.get(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 # =============================================================
 # CHATBOT (RAG + 뉴스 + 지표 + 시세 + Langchain + 세션/라우트)
 # =============================================================
 
 # ===== 시스템 프롬프트 =====
-# 답변 톤/형식, 도구 사용 원칙 요약
 SYSTEM_INSTRUCTIONS = """
 # 역할
-경제 뉴스 분석 AI 챗봇. 
-한국어로 물어보면 한국어만 사용.
-영어로 물어보면 영어만 사용.
+경제 뉴스 분석 AI 챗봇. 한국어로 물어보면 한국어만, 영어로 물어보면 영어만 사용.
 
-# 핵심 원칙
-- 가격/수치는 **반드시 도구를 호출한 후** 그 결과값만 사용
-- 도구 호출 없이 숫자를 말하면 무조건 오류
-- 아래 예시의 숫자는 형식 참고용이며, 절대 그대로 사용 금지
+# 최우선 원칙: 숫자 정확성
+1. 모든 가격, 지수, 환율, 퍼센트 수치는 **반드시 [DATA] 태그 안의 값만 사용**
+2. [DATA] 태그가 없으면 숫자를 절대 언급하지 않음
+3. 숫자를 반올림, 변환, 추정하지 않음 - 있는 그대로만 전달
+4. "약", "대략", "정도", "추정" 같은 불확실한 표현 금지
 
-# 도구 사용
-| 요청 유형 | 도구 |
-|-----------|------|
-| 개별 종목 | get_market(market_type="QUOTE", ticker="종목코드") |
-| 코스피 | get_market(market_type="KOSPI") |
-| 코스닥 | get_market(market_type="KOSDAQ") |
-| 환율 | get_market(market_type="USD_KRW") |
-| 경제지표 | get_indicator(indicator_type="GDP/CPI/RATE") |
-| 뉴스 | get_latest_news(count=N) |
+# 응답 생성 규칙
+## [DATA] 태그가 있을 때
+- 태그 안의 숫자를 **한 글자도 바꾸지 말고** 그대로 응답에 포함
+- 예: [DATA]price=52000[/DATA] → "52,000원" (천 단위 쉼표만 허용)
 
-# 주요 종목 티커
-- 삼성전자: 005930
-- SK하이닉스: 000660
-- LG전자: 066570
-- 카카오: 035720
-- 네이버: 035420
-- 해외: AAPL, TSLA, NVDA, MSFT, GOOGL
+## [DATA] 태그가 없을 때
+- 숫자가 필요한 질문 → "현재 조회할 수 없습니다. 잠시 후 다시 시도해 주세요."
+- 일반 대화 → 자연스럽게 응답 (단, 경제 수치 언급 금지)
 
-위 목록에 없는 종목은 사용자에게 티커 확인 요청.
-
-# 응답 규칙
-1. 도구 호출 성공 → 받은 값 그대로 전달
-2. 도구 호출 실패 → "조회할 수 없습니다. 잠시 후 다시 시도해 주세요."
-3. 티커 불명확 → "종목코드를 알려주시겠어요?"
-4. 지원 안 되는 요청 → "해당 데이터는 제공되지 않습니다."
+## 모르는 정보
+- "정확한 정보를 확인하기 어렵습니다"라고 솔직히 답변
+- 절대 추측하거나 지어내지 않음
 
 # 응답 형식
-- 국내: "삼성전자(005930)의 현재 주가는 XX,XXX원입니다."
-- 해외: "테슬라(TSLA)의 현재 주가는 $XXX.XX입니다."
-- 마지막: "더 궁금한 부분이 있으신가요?"
+- 국내 주식: "{종목명}({코드})의 현재 주가는 {price}원입니다. 전일 대비 {change}원({changePct}%) 변동했습니다."
+- 해외 주식: "{종목명}({티커})의 현재 주가는 ${price}입니다."
+- 환율: "현재 {통화} 환율은 {price}원입니다."
+- 마무리: "더 궁금한 부분이 있으신가요?"
 
-# 예시
-
-[사용자] 삼성전자 주가
-[행동] get_market 호출 → 결과의 price, change 값 사용
-[응답] 삼성전자(005930)의 현재 주가는 {price}원입니다. 전일 대비 {change}% 변동했네요.
-
-[사용자] 테슬라 얼마야?
-[행동] get_market 호출 → 결과의 price 값 사용
-[응답] 테슬라(TSLA)의 현재 주가는 ${price}입니다.
-
-[사용자] 그 IT 회사 주가
-[행동] 종목 특정 불가 → 도구 호출 안 함
-[응답] 어떤 회사를 말씀하시는 건가요? 종목명을 알려주시면 조회해 드릴게요.
-
-[사용자] 작년 최고가 알려줘
-[행동] 지원하지 않는 데이터 → 도구 호출 안 함
-[응답] 과거 최고가 데이터는 현재 제공되지 않습니다. 현재 주가를 조회해 드릴까요?
-
-# 금지 사항
-- 도구 호출 전에 가격 언급
-- 예시의 숫자(72500, 123.45 등)를 응답에 사용
-- "도구호출:", "도구결과:" 텍스트를 응답에 포함
-- 도구 실패 시 추측으로 대체
+# 금지 사항 (위반 시 오류)
+[DATA] 태그 밖에서 가격/지수/환율 숫자 생성
+"72,500원", "1,350원" 등 임의의 숫자 사용
+"약 5만원대", "50,000원 정도" 같은 추정 표현
+과거 데이터, 예측, 전망 언급 (지원하지 않음)
+"도구호출:", "도구결과:", "[DATA]" 텍스트를 응답에 노출
 """
 
+# ===== 도구별 프롬프트 템플릿 (할루시네이션 방지 강화) =====
+TOOL_PROMPT_TEMPLATE = """사용자 질문: {user_message}
+
+[DATA]
+{tool_output}
+[/DATA]
+
+위 [DATA] 태그 안의 정보만 사용하여 답변하세요.
+
+중요 규칙:
+1. [DATA] 안의 숫자를 **절대 변경하지 마세요** (반올림, 단위 변환 금지)
+2. [DATA]에 없는 정보는 언급하지 마세요
+3. 응답에 [DATA] 태그를 포함하지 마세요
+4. 100~150자로 간결하게 작성하세요
+5. 마지막에 "더 궁금한 부분이 있으신가요?" 추가"""
 
 # ===== 도구 함수 래퍼 정의 =====
 def get_latest_news_wrapper(count: int) -> dict:
     """최신 뉴스 조회 래퍼"""
     try:
-        n = max(1, min(20, count))  # count를 n으로 변환
+        n = max(MIN_NEWS_COUNT, min(NEWS_ROUTER_MAX_COUNT, count))
         rows = fetch_latest_topn_from_mongo(n)
         return {"output": format_topn_md(rows)}
     except Exception as e:
@@ -208,7 +513,7 @@ def get_indicator_wrapper(indicator_type: str) -> dict:
         return {"output": data}
     
     except Exception as e:
-        log.error(f"get_indicator {t} 실패: {e}")
+        log.error("get_indicator 실패", indicator_type=t, error=str(e))
         return {"error": f"{t} 조회 실패: {str(e)}"}
 
 # ===== 통합 티커 매핑 (종목명 → 티커 변환용) =====
@@ -308,7 +613,7 @@ def resolve_ticker(ticker: str) -> str:
     # 통합 매핑에서 확인
     for name, tkr in STOCK_TICKER_MAP.items():
         if name.lower() in ticker_clean.lower():
-            log.info(f"종목 자동 변환: '{ticker}' → {tkr}")
+            log.info("종목 자동 변환", input=ticker, output=tkr)
             return tkr
 
     # 6자리 숫자 → 한국 주식으로 추정
@@ -361,8 +666,8 @@ class ToolRouter:
     def _extract_news_params(self, query: str) -> dict:
         """뉴스 개수 추출"""
         match = re.search(r'(\d+)개', query)
-        count = int(match.group(1)) if match else 5
-        count = max(1, min(20, count))  # 1~20 제한
+        count = int(match.group(1)) if match else DEFAULT_NEWS_COUNT
+        count = max(MIN_NEWS_COUNT, min(NEWS_ROUTER_MAX_COUNT, count))
         return {'count': count}
 
     def _extract_stock_params_flexible(self, query: str) -> dict:
@@ -372,14 +677,14 @@ class ToolRouter:
         # 1. 통합 매핑에서 확인
         for name, ticker in STOCK_TICKER_MAP.items():
             if name.lower() in query_lower:
-                log.info(f"패턴 매칭: 종목 '{name}' → {ticker}")
+                log.info("패턴 매칭: 종목명", name=name, ticker=ticker)
                 return {'market_type': 'QUOTE', 'ticker': ticker}
 
         # 2. 6자리 숫자 티커 (한국 주식)
         match = re.search(r'(\d{6})', query)
         if match:
             ticker = f"{match.group(1)}.KS"
-            log.info(f"패턴 매칭: 숫자 티커 → {ticker}")
+            log.info("패턴 매칭: 숫자 티커", ticker=ticker)
             return {'market_type': 'QUOTE', 'ticker': ticker}
 
         # 3. 영문 대문자 1~5자 티커 (해외 주식)
@@ -389,11 +694,11 @@ class ToolRouter:
             # 일반 단어 제외
             excluded = {'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'YOU', 'ALL', 'CAN', 'HAD', 'HER', 'WAS', 'ONE', 'OUR', 'OUT'}
             if ticker not in excluded:
-                log.info(f"패턴 매칭: 영문 티커 → {ticker}")
+                log.info("패턴 매칭: 영문 티커", ticker=ticker)
                 return {'market_type': 'QUOTE', 'ticker': ticker}
 
         # 4. 종목 특정 불가 → 빈 티커 반환 (LLM이 사용자에게 확인 요청)
-        log.warning(f"종목 특정 불가: '{query}'")
+        log.warning("종목 특정 불가", query=query)
         return {'market_type': 'QUOTE', 'ticker': ''}
 
     def _extract_docs_params(self, query: str) -> dict:
@@ -413,7 +718,7 @@ class ToolRouter:
                         'params': params
                     }
                 except Exception as e:
-                    log.error(f"파라미터 추출 실패 ({pattern}): {e}")
+                    log.error("파라미터 추출 실패", pattern=pattern, error=str(e))
                     continue
 
         return None  # 매칭 안 됨 → 일반 대화
@@ -422,170 +727,117 @@ class ToolRouter:
 router = ToolRouter()
 
 # ===== PyKRX 시세 조회 =====
-def fetch_quote_formatted(ticker: str) -> dict:
-    """PyKRX 우선 → yfinance 최소 fallback (LangChain용 숫자 형식)"""
-    ticker_code = resolve_ticker(ticker.strip())
-    log.info(f"쿼리: {ticker} → {ticker_code}")
 
-    def _format_output(q: dict, ticker_display: str) -> dict:
-        """조회 결과를 안전하게 포맷팅"""
-        price = q.get('price')
-        if price is None:
-            return {"error": f"{ticker_display} 가격 데이터 없음"}
-
-        change = q.get('change')
-        change_pct = q.get('changePct')
-        # ts_kst 또는 date 필드에서 날짜 추출
-        date_str = q.get('ts_kst') or q.get('date') or datetime.now(KST).strftime("%Y-%m-%d")
-
-        # ISO 형식이면 날짜만 추출
-        if isinstance(date_str, str) and 'T' in date_str:
-            date_str = date_str.split('T')[0]
-
-        # None 값 안전 처리
-        change_str = f"{change:.0f}" if change is not None else "N/A"
-        change_pct_str = f"{change_pct:.2f}" if change_pct is not None else "N/A"
-
-        return {
-            "output": f"price={price}, change={change_str}, changePct={change_pct_str}, date={date_str}"
-        }
-
-    # 1. 한국 주식: 6자리 코드 또는 .KS/.KQ 접미사 → PyKRX
-    krx_code = None
+def _extract_krx_code(ticker_code: str) -> str | None:
+    """티커 코드에서 KRX 6자리 코드 추출"""
     if re.match(r'^\d{6}$', ticker_code):
-        krx_code = ticker_code
-    elif ticker_code.endswith(('.KS', '.KQ')):
-        krx_code = ticker_code.replace('.KS', '').replace('.KQ', '')
+        return ticker_code
+    if ticker_code.endswith(('.KS', '.KQ')):
+        return ticker_code.replace('.KS', '').replace('.KQ', '')
+    return None
 
-    if krx_code:
-        q = fetch_quote_krx(krx_code)
-        if q and q.get('price') is not None:
-            return _format_output(q, ticker)
+def _format_quote_raw(q: dict, ticker_display: str) -> dict:
+    """조회 결과를 LangChain용 숫자 형식으로 포맷팅"""
+    price = q.get('price')
+    if price is None:
+        return {"error": f"{ticker_display} 가격 데이터 없음"}
 
-    # 2. 글로벌 주식/지수: yfinance (ORCL, ^KS11 등)
-    yf_ticker = ticker_code
-    if re.match(r'^\d{6}$', ticker_code):
-        yf_ticker = f"{ticker_code}.KS"  # PyKRX 실패시 yf용
+    change = q.get('change')
+    change_pct = q.get('changePct')
+    date_str = q.get('ts_kst') or q.get('date') or datetime.now(KST).strftime("%Y-%m-%d")
 
+    # ISO 형식이면 날짜만 추출
+    if isinstance(date_str, str) and 'T' in date_str:
+        date_str = date_str.split('T')[0]
+
+    change_str = f"{change:.0f}" if change is not None else "N/A"
+    change_pct_str = f"{change_pct:.2f}" if change_pct is not None else "N/A"
+
+    return {"output": f"price={price}, change={change_str}, changePct={change_pct_str}, date={date_str}"}
+
+def _try_fetch_krx(krx_code: str, ticker_display: str) -> dict | None:
+    """PyKRX에서 시세 조회 시도"""
+    q = fetch_quote_krx(krx_code)
+    if q and q.get('price') is not None:
+        return _format_quote_raw(q, ticker_display)
+    return None
+
+def _try_fetch_yf(yf_ticker: str, ticker_display: str) -> dict | None:
+    """yfinance에서 시세 조회 시도"""
     q = fetch_quote_yf(yf_ticker)
     if q and q.get('price') is not None:
-        return _format_output(q, ticker)
+        return _format_quote_raw(q, ticker_display)
+    return None
+
+
+def fetch_quote_formatted(ticker: str) -> dict:
+    """PyKRX 우선 → yfinance fallback (LangChain용 숫자 형식)"""
+    ticker_code = resolve_ticker(ticker.strip())
+    log.info("시세 조회 요청", input_ticker=ticker, resolved_ticker=ticker_code)
+
+    # 1. 한국 주식: PyKRX 우선 시도
+    krx_code = _extract_krx_code(ticker_code)
+    if krx_code:
+        result = _try_fetch_krx(krx_code, ticker)
+        if result:
+            return result
+
+    # 2. 글로벌 주식/지수: yfinance
+    yf_ticker = f"{ticker_code}.KS" if re.match(r'^\d{6}$', ticker_code) else ticker_code
+    result = _try_fetch_yf(yf_ticker, ticker)
+    if result:
+        return result
 
     return {"error": f"{ticker} 데이터 없음"}
 
 
-# ===== yfinance 시세 조회 =====
-def get_market_wrapper(market_type: str, ticker: str = "") -> dict:
-    """시장 데이터 조회 래퍼 (동기)"""
-    try:
-        market_type = market_type.strip().upper()
+# ===== 시장 데이터 포맷팅 함수 =====
 
-        if market_type == "KOSPI":
-            return {"output": get_kospi_index()}
-        elif market_type == "KOSDAQ":
-            return {"output": get_kosdaq_index()}
-        elif market_type == "USD_KRW":
-            return {"output": get_usd_krw()}
-        elif market_type == "JPY_KRW":
-            return {"output": get_jpy_krw()}
-        elif market_type == "EUR_USD":
-            return {"output": get_eur_usd()}
-        elif market_type == "MARKET_SUMMARY":
-            return {"output": f"{get_market_indices()}\n\n{get_fx_rates()}"}
-        elif market_type == "QUOTE":
-            # 빈 티커 처리 → 사용자에게 종목명 확인 요청
-            if not ticker or ticker.strip() == "":
-                return {"output": "종목을 특정할 수 없습니다. 종목명이나 티커 코드를 알려주시겠어요? (예: 삼성전자, AAPL, 005930)"}
-            return fetch_quote_formatted(ticker)
-
-        else:
-            return {"error": f"지원하지 않는 시장 타입: {market_type}"}
-    except Exception as e:
-        return {"error": f"시장 데이터 조회 실패: {str(e)}"}
-
-
-async def get_market_wrapper_async(market_type: str, ticker: str = "") -> dict:
-    """시장 데이터 조회 래퍼 (비동기 - 캐시 활용)"""
-    try:
-        market_type = market_type.strip().upper()
-
-        if market_type == "KOSPI":
-            data = await fetch_quote_cached_async(TICKER_KOSPI)
-            return _format_index_output("코스피", data)
-        elif market_type == "KOSDAQ":
-            data = await fetch_quote_cached_async(TICKER_KOSDAQ)
-            return _format_index_output("코스닥", data)
-        elif market_type == "USD_KRW":
-            data = await fetch_quote_cached_async(TICKER_USD_KRW)
-            return _format_fx_output("달러/원", data)
-        elif market_type == "JPY_KRW":
-            data = await fetch_quote_cached_async(TICKER_JPY_KRW)
-            return _format_fx_output("엔/원", data, multiply=100)
-        elif market_type == "EUR_USD":
-            data = await fetch_quote_cached_async(TICKER_EUR_USD)
-            return _format_fx_output("유로/달러", data)
-        elif market_type == "MARKET_SUMMARY":
-            # 병렬로 모든 지수/환율 조회
-            tickers = [TICKER_KOSPI, TICKER_KOSDAQ, TICKER_DOW, TICKER_SP500, TICKER_USD_KRW, TICKER_JPY_KRW]
-            results = await fetch_quotes_parallel(tickers)
-            return _format_market_summary(results)
-        elif market_type == "QUOTE":
-            if not ticker or ticker.strip() == "":
-                return {"output": "종목을 특정할 수 없습니다. 종목명이나 티커 코드를 알려주시겠어요? (예: 삼성전자, AAPL, 005930)"}
-            # 티커 정규화
-            resolved = resolve_ticker(ticker)
-            data = await fetch_quote_cached_async(resolved)
-            return _format_quote_output(ticker, data)
-        else:
-            return {"error": f"지원하지 않는 시장 타입: {market_type}"}
-    except Exception as e:
-        return {"error": f"시장 데이터 조회 실패: {str(e)}"}
-
-
-def _format_index_output(name: str, data: dict) -> dict:
-    """지수 데이터 포맷팅"""
+def _format_index_output(name: str, data: Dict[str, Any]) -> Dict[str, str]:
+    """지수 데이터 포맷팅 (타입 안전)"""
     price = data.get("price")
     if price is None:
-        return {"output": f"**{name} 지수**\n• 현재 데이터를 가져올 수 없습니다."}
-    ch = data.get("change", 0) or 0
-    pct = data.get("changePct", 0) or 0
+        return make_error(f"{name} 지수 데이터를 가져올 수 없습니다.")
+    ch = _get_safe_float(data, "change")
+    pct = _get_safe_float(data, "changePct")
     sign = "+" if ch >= 0 else ""
-    return {"output": f"**{name} 지수 (실시간)**\n• 현재가: {price:,.2f}\n• 변동: {sign}{ch:.2f} ({sign}{pct:.2f}%)"}
+    return make_success(f"**{name} 지수 (실시간)**\n• 현재가: {price:,.2f}\n• 변동: {sign}{ch:.2f} ({sign}{pct:.2f}%)")
 
 
-def _format_fx_output(name: str, data: dict, multiply: int = 1) -> dict:
-    """환율 데이터 포맷팅"""
+def _format_fx_output(name: str, data: Dict[str, Any], multiply: int = 1) -> Dict[str, str]:
+    """환율 데이터 포맷팅 (타입 안전)"""
     price = data.get("price")
     if price is None:
-        return {"output": f"**{name} 환율**\n• 현재 데이터를 가져올 수 없습니다."}
+        return make_error(f"{name} 환율 데이터를 가져올 수 없습니다.")
     display_price = price * multiply if multiply > 1 else price
-    ch = (data.get("change", 0) or 0) * multiply
-    pct = data.get("changePct", 0) or 0
+    ch = _get_safe_float(data, "change") * multiply
+    pct = _get_safe_float(data, "changePct")
     sign = "+" if ch >= 0 else ""
     unit = "원" if "원" in name else "달러"
-    return {"output": f"**{name} 환율 (실시간)**\n• 현재: {display_price:,.2f}{unit}\n• 변동: {sign}{ch:.2f} ({sign}{pct:.2f}%)"}
+    return make_success(f"**{name} 환율 (실시간)**\n• 현재: {display_price:,.2f}{unit}\n• 변동: {sign}{ch:.2f} ({sign}{pct:.2f}%)")
 
 
-def _format_quote_output(ticker: str, data: dict) -> dict:
-    """개별 종목 시세 포맷팅"""
+def _format_quote_output(ticker: str, data: Dict[str, Any]) -> Dict[str, str]:
+    """개별 종목 시세 포맷팅 (타입 안전)"""
     if data.get("error"):
-        return {"error": data["error"]}
+        return make_error(str(data["error"]))
     price = data.get("price")
     if price is None:
-        return {"output": f"{ticker} 시세를 가져올 수 없습니다."}
-    ch = data.get("change", 0) or 0
-    pct = data.get("changePct", 0) or 0
+        return make_error(f"{ticker} 시세를 가져올 수 없습니다.")
+    ch = _get_safe_float(data, "change")
+    pct = _get_safe_float(data, "changePct")
     sign = "+" if ch >= 0 else ""
     # 원화/달러 구분
-    is_korean = data.get("ticker", "").endswith((".KS", ".KQ"))
+    ticker_str = data.get("ticker") or ""
+    is_korean = ticker_str.endswith((".KS", ".KQ"))
     if is_korean:
-        return {"output": f"**{ticker} 시세 (실시간)**\n• 현재가: {price:,.0f}원\n• 변동: {sign}{ch:,.0f}원 ({sign}{pct:.2f}%)"}
+        return make_success(f"**{ticker} 시세 (실시간)**\n• 현재가: {price:,.0f}원\n• 변동: {sign}{ch:,.0f}원 ({sign}{pct:.2f}%)")
     else:
-        return {"output": f"**{ticker} 시세 (실시간)**\n• 현재가: ${price:,.2f}\n• 변동: {sign}${ch:.2f} ({sign}{pct:.2f}%)"}
+        return make_success(f"**{ticker} 시세 (실시간)**\n• 현재가: ${price:,.2f}\n• 변동: {sign}${ch:.2f} ({sign}{pct:.2f}%)")
 
 
-def _format_market_summary(results: dict) -> dict:
-    """시장 요약 포맷팅"""
+def _format_market_summary(results: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """시장 요약 포맷팅 (타입 안전)"""
     lines = ["**📊 시장 요약 (실시간)**\n"]
 
     # 지수
@@ -593,8 +845,8 @@ def _format_market_summary(results: dict) -> dict:
     for ticker, name in [(TICKER_KOSPI, "코스피"), (TICKER_KOSDAQ, "코스닥"), (TICKER_DOW, "다우"), (TICKER_SP500, "S&P500")]:
         data = results.get(ticker, {})
         price = data.get("price")
-        if price:
-            pct = data.get("changePct", 0) or 0
+        if price is not None:
+            pct = _get_safe_float(data, "changePct")
             sign = "+" if pct >= 0 else ""
             lines.append(f"• {name}: {price:,.2f} ({sign}{pct:.2f}%)")
 
@@ -603,13 +855,61 @@ def _format_market_summary(results: dict) -> dict:
     for ticker, name in [(TICKER_USD_KRW, "달러/원"), (TICKER_JPY_KRW, "엔/원(100)")]:
         data = results.get(ticker, {})
         price = data.get("price")
-        if price:
-            display = price * 100 if ticker == TICKER_JPY_KRW else price
-            pct = data.get("changePct", 0) or 0
+        if price is not None:
+            display = price * JPY_MULTIPLY if ticker == TICKER_JPY_KRW else price
+            pct = _get_safe_float(data, "changePct")
             sign = "+" if pct >= 0 else ""
             lines.append(f"• {name}: {display:,.2f} ({sign}{pct:.2f}%)")
 
-    return {"output": "\n".join(lines)}
+    return make_success("\n".join(lines))
+
+# ===== 시장 데이터 조회 (비동기) =====
+
+# 시장 타입별 설정 (ticker, formatter, kwargs)
+_MARKET_TYPE_CONFIG = {
+    "KOSPI": (TICKER_KOSPI, _format_index_output, {"name": "코스피"}),
+    "KOSDAQ": (TICKER_KOSDAQ, _format_index_output, {"name": "코스닥"}),
+    "USD_KRW": (TICKER_USD_KRW, _format_fx_output, {"name": "달러/원"}),
+    "JPY_KRW": (TICKER_JPY_KRW, _format_fx_output, {"name": "엔/원", "multiply": JPY_MULTIPLY}),
+    "EUR_USD": (TICKER_EUR_USD, _format_fx_output, {"name": "유로/달러"}),
+}
+
+async def _handle_market_summary() -> dict:
+    """시장 요약 조회 (병렬)"""
+    tickers = [TICKER_KOSPI, TICKER_KOSDAQ, TICKER_DOW, TICKER_SP500, TICKER_USD_KRW, TICKER_JPY_KRW]
+    results = await fetch_quotes_parallel(tickers)
+    return _format_market_summary(results)
+
+async def _handle_quote(ticker: str) -> dict:
+    """개별 종목 시세 조회"""
+    if not ticker or ticker.strip() == "":
+        return {"output": "종목을 특정할 수 없습니다. 종목명이나 티커 코드를 알려주시겠어요? (예: 삼성전자, AAPL, 005930)"}
+    resolved = resolve_ticker(ticker)
+    data = await fetch_quote_cached_async(resolved)
+    return _format_quote_output(ticker, data)
+
+async def get_market_wrapper_async(market_type: str, ticker: str = "") -> dict:
+    """시장 데이터 조회 래퍼 (비동기 - 캐시 활용)"""
+    try:
+        market_type = market_type.strip().upper()
+
+        # 특수 케이스: MARKET_SUMMARY, QUOTE
+        if market_type == "MARKET_SUMMARY":
+            return await _handle_market_summary()
+        if market_type == "QUOTE":
+            return await _handle_quote(ticker)
+
+        # 일반 케이스: 설정 기반 디스패치
+        config = _MARKET_TYPE_CONFIG.get(market_type)
+        if not config:
+            return {"error": f"지원하지 않는 시장 타입: {market_type}"}
+
+        ticker_symbol, formatter, kwargs = config
+        data = await fetch_quote_cached_async(ticker_symbol)
+        return formatter(data=data, **kwargs)
+
+    except Exception as e:
+        return {"error": f"시장 데이터 조회 실패: {str(e)}"}
 
 # ===== 벡터스토어 초기화 (앱 시작 시 1회) =====
 embeddings = HuggingFaceEmbeddings(
@@ -630,8 +930,8 @@ def create_vectorstore():
     
     # 청크 분할
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
+        chunk_size=RAG_CHUNK_SIZE,
+        chunk_overlap=RAG_CHUNK_OVERLAP
     )
     chunks = text_splitter.split_documents(documents)
     
@@ -649,72 +949,56 @@ except Exception:
 # ===== 검색 함수 =====
 def search_docs_wrapper(query: str) -> dict:
     """벡터스토어 문서 검색 래퍼"""
-    docs = vectorstore.similarity_search(query, k=3)
+    docs = vectorstore.similarity_search(query, k=RAG_TOP_K)
     if not docs:
         return {"output": "관련 문서를 찾지 못했습니다."}
     
     # LLM 호출 없이 문서 내용만 반환
-    context = "\n\n".join([f"• {doc.page_content[:200]}" for doc in docs])
+    context = "\n\n".join([f"• {doc.page_content[:RAG_CONTEXT_MAX_CHARS]}" for doc in docs])
     return {"output": f"검색 결과:\n{context}"}
 
 # ===== Ollama LLM (규칙 기반 라우팅용) =====
 llm = ChatOllama(
     model="gemma2:9b",
-    base_url="http://localhost:11434",
-    temperature=0.3,
-    num_ctx=8192,  # Gemma 2는 8K 컨텍스트 지원
-    num_predict=512,
+    base_url=OLLAMA_BASE_URL,
+    temperature=LLM_TEMPERATURE,
+    num_ctx=LLM_NUM_CTX,
+    num_predict=LLM_NUM_PREDICT,
 )
 
 # 스트리밍용 LLM (별도 인스턴스)
 llm_stream = ChatOllama(
     model="gemma2:9b",
-    base_url="http://localhost:11434",
-    temperature=0.3,
-    num_ctx=8192,
-    num_predict=512,
+    base_url=OLLAMA_BASE_URL,
+    temperature=LLM_TEMPERATURE,
+    num_ctx=LLM_NUM_CTX,
+    num_predict=LLM_NUM_PREDICT,
 )
 
 # ===== 규칙 기반 채팅 함수 (Gemma 2 9B 최적화) =====
 GREETING_KEYWORDS = ["안녕", "hello", "hi", "반가", "처음", "감사", "반갑", "초보"]
 GREETING_RESPONSE = "안녕하세요! 저는 경제 뉴스와 실시간 경제 지표, 주가 정보를 제공하며, 경제 용어 설명으로 경제 학습을 도와드립니다. 무엇이 궁금하신가요?"
 
-# 도구 함수 매핑 (공통)
-TOOL_MAP = {
+# 도구 함수 매핑 (동기 함수용 - ThreadPool 래핑에 사용)
+TOOL_MAP_SYNC = {
     'get_latest_news': get_latest_news_wrapper,
     'get_indicator': get_indicator_wrapper,
-    'get_market': get_market_wrapper,
     'search_docs': search_docs_wrapper
 }
 
-
-def _execute_tool(tool_name: str, params: dict) -> dict:
-    """도구 실행 공통 함수 (동기)"""
-    tool_func = TOOL_MAP.get(tool_name)
-    if not tool_func:
-        return {"error": f"알 수 없는 도구: {tool_name}"}
-
-    if tool_name == 'get_latest_news':
-        return tool_func(count=params.get('count', 5))
-    elif tool_name == 'get_indicator':
-        return tool_func(indicator_type=params.get('indicator_type', ''))
-    elif tool_name == 'get_market':
-        return tool_func(market_type=params.get('market_type', ''), ticker=params.get('ticker', ''))
-    elif tool_name == 'search_docs':
-        return tool_func(query=params.get('query', ''))
-    return {"error": "도구 실행 실패"}
-
+# 지원하는 도구 목록
+SUPPORTED_TOOLS = {'get_latest_news', 'get_indicator', 'get_market', 'search_docs'}
 
 async def _execute_tool_async(tool_name: str, params: dict) -> dict:
-    """도구 실행 공통 함수 (비동기)
+    """도구 실행 공통 함수 (비동기 전용)
 
     - get_market: 비동기 함수 직접 호출 (캐시 + 병렬 처리 지원)
     - 나머지 도구: ThreadPoolExecutor로 비동기 래핑 (MongoDB, ECOS/FRED API, FAISS 검색)
     """
-    if tool_name not in TOOL_MAP and tool_name != 'get_market':
+    if tool_name not in SUPPORTED_TOOLS:
         return {"error": f"알 수 없는 도구: {tool_name}"}
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     if tool_name == 'get_market':
         # 비동기 시세 조회 (캐시 + 세마포어 적용)
@@ -745,83 +1029,168 @@ async def _execute_tool_async(tool_name: str, params: dict) -> dict:
             )
     return {"error": "도구 실행 실패"}
 
+# ===== 도구 결과 검증 및 정제 =====
+def _extract_numbers_from_text(text: str) -> set:
+    """텍스트에서 모든 숫자 추출 (검증용)"""
+    # 정수, 소수, 천 단위 쉼표 포함 숫자 추출
+    patterns = [
+        r'-?\d{1,3}(?:,\d{3})*(?:\.\d+)?',  # 1,234,567.89
+        r'-?\d+(?:\.\d+)?',  # 1234.56
+    ]
+    numbers = set()
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        for m in matches:
+            # 쉼표 제거 후 정규화
+            normalized = m.replace(',', '')
+            try:
+                num = float(normalized)
+                numbers.add(num)
+                # 원본 형태도 저장 (쉼표 포함)
+                numbers.add(m)
+            except ValueError:
+                pass
+    return numbers
+
+def _validate_tool_result(tool_result: dict) -> dict:
+    """도구 결과 검증 및 정제"""
+    if "error" in tool_result:
+        return tool_result
+
+    output = tool_result.get("output", "")
+    if not output:
+        return {"error": "도구 결과가 비어있습니다"}
+
+    # 결과에서 핵심 숫자 추출하여 메타데이터로 저장
+    extracted_numbers = _extract_numbers_from_text(str(output))
+
+    return {
+        "output": output,
+        "_valid_numbers": extracted_numbers,  # 검증용 메타데이터
+        "_raw_output": output  # 원본 보존
+    }
 
 def _build_tool_prompt(user_message: str, tool_output: str) -> str:
-    """도구 결과를 자연어로 변환하기 위한 프롬프트 생성"""
-    return f"""사용자 질문: {user_message}
+    """도구 결과를 자연어로 변환하기 위한 프롬프트 생성 (강화된 버전)"""
+    return TOOL_PROMPT_TEMPLATE.format(
+        user_message=user_message,
+        tool_output=tool_output
+    )
 
-도구 실행 결과:
-{tool_output}
+# ===== 응답 후처리 필터 (할루시네이션 감지) =====
+# 의심스러운 추정 표현 패턴
+HALLUCINATION_PATTERNS = [
+    r'약\s*\d',           # "약 50000"
+    r'대략\s*\d',         # "대략 1000"
+    r'정도\s*(?:입니다|예요|이에요)',  # "5만원 정도입니다"
+    r'추정\s*(?:됩니다|입니다)',       # "추정됩니다"
+    r'예상\s*(?:됩니다|입니다)',       # "예상됩니다"
+    r'아마\s*\d',         # "아마 50000"
+    r'대충\s*\d',         # "대충 5만"
+    r'\d+\s*(?:쯤|가량|내외)',  # "5만원쯤", "50000가량"
+]
 
-위 정보를 바탕으로 사용자에게 친절하고 자연스러운 한국어로 답변하세요.
-- 100~200자 분량으로 간결하게 작성
-- 도구 결과의 숫자와 날짜를 그대로 사용 (절대 임의 생성 금지)
-- 마지막에 "더 궁금한 부분이 있으신가요?" 추가"""
+# 컴파일된 패턴 (성능 최적화)
+HALLUCINATION_REGEX = re.compile('|'.join(HALLUCINATION_PATTERNS), re.IGNORECASE)
 
+def _detect_hallucination_patterns(response: str) -> List[str]:
+    """응답에서 할루시네이션 의심 패턴 감지"""
+    return HALLUCINATION_REGEX.findall(response)
+
+def _remove_data_tags(text: str) -> str:
+    """[DATA] 태그 제거"""
+    text = re.sub(r'\[/?DATA\]', '', text)
+    text = re.sub(r'\[DATA\].*?\[/DATA\]', '', text, flags=re.DOTALL)
+    return text
+
+def _replace_hallucination_patterns(text: str) -> str:
+    """할루시네이션 패턴을 안전한 표현으로 대체"""
+    matches = _detect_hallucination_patterns(text)
+    if not matches:
+        return text
+
+    log.warning("할루시네이션 의심 패턴 감지", matches=matches)
+    for pattern in HALLUCINATION_PATTERNS:
+        text = re.sub(pattern, '[정확한 수치는 다시 조회해 주세요]', text, flags=re.IGNORECASE)
+    return text
+
+def _is_number_valid(num: float, valid_numbers: set) -> bool:
+    """숫자가 유효 목록에 있는지 확인 (부동소수점 오차 허용)"""
+    for valid in valid_numbers:
+        if isinstance(valid, (int, float)):
+            if abs(num - valid) < NUMBER_TOLERANCE:
+                return True
+        elif isinstance(valid, str):
+            try:
+                valid_num = float(valid.replace(',', ''))
+                if abs(num - valid_num) < NUMBER_TOLERANCE:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+def _find_suspicious_numbers(text: str, valid_numbers: set) -> List[float]:
+    """도구 결과에 없는 의심스러운 숫자 찾기 (임계값 이상만)"""
+    response_numbers = _extract_numbers_from_text(text)
+    suspicious = []
+
+    for num in response_numbers:
+        if isinstance(num, (int, float)) and num >= SUSPICIOUS_NUMBER_THRESHOLD:
+            if not _is_number_valid(num, valid_numbers):
+                suspicious.append(num)
+
+    return suspicious
+
+def _filter_response(response: str, valid_numbers: set = None) -> str:
+    """응답 후처리 필터링 (할루시네이션 감지 및 정제)"""
+    # 1. [DATA] 태그 제거
+    filtered = _remove_data_tags(response)
+
+    # 2. 할루시네이션 패턴 대체
+    filtered = _replace_hallucination_patterns(filtered)
+
+    # 3. 도구 결과에 없는 숫자 감지 (로깅만)
+    if valid_numbers:
+        suspicious = _find_suspicious_numbers(filtered, valid_numbers)
+        if suspicious:
+            log.warning("도구 결과에 없는 숫자 감지", suspicious_numbers=suspicious)
+
+    # 4. 불필요한 공백 정리
+    filtered = re.sub(r'\n{3,}', '\n\n', filtered)
+    return filtered.strip()
 
 def _build_chat_prompt(history: list, user_message: str) -> str:
     """일반 대화용 프롬프트 생성"""
     messages = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
-    for turn in history[-10:]:
+    for turn in history[-MAX_HISTORY_TURNS:]:
         messages.append({"role": turn['role'], "content": turn['content']})
     messages.append({"role": "user", "content": user_message})
     return "\n\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
 
+async def _invoke_llm_async(prompt: str) -> str:
+    """LLM 호출 (세마포어 + 타임아웃 적용)
 
-def chat_with_agent(user_message: str, session_id: str = "default") -> str:
-    """규칙 기반 라우팅 + Gemma 2 9B 응답 생성"""
-
-    # 1. 인사 감지 시 즉시 반환
-    if any(kw in user_message.lower() for kw in GREETING_KEYWORDS):
-        add_turn(session_id, "user", user_message)
-        add_turn(session_id, "assistant", GREETING_RESPONSE)
-        return GREETING_RESPONSE
-
-    try:
-        # 2. 규칙 기반 라우팅으로 도구 선택
-        route_result = router.route(user_message)
-
-        if route_result:
-            # 도구 실행
-            tool_name = route_result['tool']
-            params = route_result['params']
-            log.info(f"도구 호출: {tool_name}({params})")
-
-            tool_result = _execute_tool(tool_name, params)
-
-            # 에러 처리
-            if "error" in tool_result:
-                error_msg = f"죄송합니다. {tool_result['error']}"
-                add_turn(session_id, "user", user_message)
-                add_turn(session_id, "assistant", error_msg)
-                return error_msg
-
-            # 3. 도구 결과를 Gemma 2로 자연어 변환
-            tool_output = tool_result.get("output", str(tool_result))
-            context_prompt = _build_tool_prompt(user_message, tool_output)
-            response = llm.invoke(context_prompt)
-        else:
-            # 4. 일반 대화 (도구 없이 Gemma 2만 사용)
-            history = get_session(session_id)
-            prompt = _build_chat_prompt(history, user_message)
-            response = llm.invoke(prompt)
-
-        # 응답 추출 및 세션 저장
-        final_answer = response.content if hasattr(response, "content") else str(response)
-        add_turn(session_id, "user", user_message)
-        add_turn(session_id, "assistant", final_answer)
-        return final_answer
-
-    except Exception as e:
-        log.exception("채팅 처리 실패")
-        return f"죄송합니다. 오류가 발생했습니다: {str(e)}"
-
+    - OLLAMA_SEMAPHORE: 동시 요청 3개 제한 (GPU 메모리 보호)
+    - LLM_TIMEOUT_SECONDS: 60초 타임아웃 (무한 대기 방지)
+    """
+    async with OLLAMA_SEMAPHORE:
+        loop = asyncio.get_running_loop()
+        try:
+            response = await asyncio.wait_for(
+                loop.run_in_executor(EXECUTOR, llm.invoke, prompt),
+                timeout=LLM_TIMEOUT_SECONDS
+            )
+            return response.content if hasattr(response, "content") else str(response)
+        except asyncio.TimeoutError:
+            log.warning("LLM 타임아웃", timeout_seconds=LLM_TIMEOUT_SECONDS)
+            raise TimeoutError(f"응답 생성 시간이 {LLM_TIMEOUT_SECONDS}초를 초과했습니다.")
 
 async def chat_with_agent_async(user_message: str, session_id: str = "default") -> str:
     """규칙 기반 라우팅 + Gemma 2 9B 응답 생성 (비동기 버전)
 
     - 도구 실행: _execute_tool_async 사용 (캐시 + 세마포어 적용)
-    - LLM 호출: ThreadPoolExecutor로 비동기 래핑
+    - LLM 호출: _invoke_llm_async 사용 (세마포어 + 타임아웃 적용)
+    - 할루시네이션 방지: 도구 결과 검증 + 응답 후처리 필터
     """
 
     # 1. 인사 감지 시 즉시 반환
@@ -830,16 +1199,17 @@ async def chat_with_agent_async(user_message: str, session_id: str = "default") 
         add_turn(session_id, "assistant", GREETING_RESPONSE)
         return GREETING_RESPONSE
 
+    valid_numbers = None  # 도구 결과의 유효 숫자 (검증용)
+
     try:
         # 2. 규칙 기반 라우팅으로 도구 선택
         route_result = router.route(user_message)
-        loop = asyncio.get_event_loop()
 
         if route_result:
             # 도구 실행 (비동기)
             tool_name = route_result['tool']
             params = route_result['params']
-            log.info(f"[비동기] 도구 호출: {tool_name}({params})")
+            log.info("도구 호출", tool=tool_name, params=params)
 
             tool_result = await _execute_tool_async(tool_name, params)
 
@@ -850,66 +1220,117 @@ async def chat_with_agent_async(user_message: str, session_id: str = "default") 
                 add_turn(session_id, "assistant", error_msg)
                 return error_msg
 
-            # 3. 도구 결과를 Gemma 2로 자연어 변환 (비동기)
-            tool_output = tool_result.get("output", str(tool_result))
+            # 3. 도구 결과 검증 및 정제
+            validated_result = _validate_tool_result(tool_result)
+            if "error" in validated_result:
+                error_msg = f"죄송합니다. {validated_result['error']}"
+                add_turn(session_id, "user", user_message)
+                add_turn(session_id, "assistant", error_msg)
+                return error_msg
+
+            tool_output = validated_result.get("output", "")
+            valid_numbers = validated_result.get("_valid_numbers", set())
+
+            # 4. 도구 결과를 Gemma 2로 자연어 변환 (세마포어 + 타임아웃 적용)
             context_prompt = _build_tool_prompt(user_message, tool_output)
-            response = await loop.run_in_executor(EXECUTOR, llm.invoke, context_prompt)
+            raw_answer = await _invoke_llm_async(context_prompt)
         else:
-            # 4. 일반 대화 (도구 없이 Gemma 2만 사용)
+            # 5. 일반 대화 (도구 없이 Gemma 2만 사용, 세마포어 + 타임아웃 적용)
             history = get_session(session_id)
             prompt = _build_chat_prompt(history, user_message)
-            response = await loop.run_in_executor(EXECUTOR, llm.invoke, prompt)
+            raw_answer = await _invoke_llm_async(prompt)
 
-        # 응답 추출 및 세션 저장
-        final_answer = response.content if hasattr(response, "content") else str(response)
+        # 7. 응답 후처리 필터 (할루시네이션 감지 및 정제)
+        final_answer = _filter_response(raw_answer, valid_numbers)
+
+        # 8. 세션 저장
         add_turn(session_id, "user", user_message)
         add_turn(session_id, "assistant", final_answer)
         return final_answer
 
     except Exception as e:
-        log.exception("[비동기] 채팅 처리 실패")
+        log.exception("채팅 처리 실패", user_message=user_message[:100])
         return f"죄송합니다. 오류가 발생했습니다: {str(e)}"
-
 
 # ===== RAG 벡터스토어 ID =====
 # ENV 우선, 없으면 .vector_store_id 파일에서 로드
-VS_ID_ENV = os.getenv("VECTOR_STORE_ID", "").strip()
 VS_ID_PATH = Path(".vector_store_id")
 VS_ID_FILE = VS_ID_PATH.read_text().strip() if VS_ID_PATH.exists() else ""
-VS_ID = VS_ID_ENV or VS_ID_FILE
+VS_ID = settings.vector_store_id or VS_ID_FILE
 if not VS_ID:
-    log.warning("VectorStore ID가 비어있습니다.")
+    log.warning("VectorStore ID가 비어있습니다")
 else:
-    log.info(f"VectorStore ID: {VS_ID}")
+    log.info("VectorStore ID 로드됨", vs_id=VS_ID[:20] + "..." if len(VS_ID) > 20 else VS_ID)
 
-# ===== MongoDB =====
-# 연결정보/DB/컬렉션 상수 (환경변수 우선, 기본값 fallback)
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("MONGO_DB_NAME", "local")
-COLL_NAME = os.getenv("MONGO_COLL_NAME", "chatbot1_rag")
+# ===== MongoDB 클라이언트 매니저 =====
+class MongoClientManager:
+    """MongoDB 연결 관리자 (싱글톤 패턴)
 
-_mongo_client = None
+    - Lazy initialization으로 필요 시에만 연결 생성
+    - Connection pooling 설정 포함
+    """
+
+    def __init__(self):
+        self._client: Optional[MongoClient] = None
+        self._uri = settings.mongo_uri
+        self._db_name = settings.mongo_db_name
+        self._coll_name = settings.mongo_coll_name
+
+    @property
+    def client(self) -> MongoClient:
+        """MongoDB 클라이언트 반환 (Lazy initialization)"""
+        if self._client is None:
+            self._client = MongoClient(
+                self._uri,
+                maxPoolSize=MONGO_MAX_POOL_SIZE,
+                minPoolSize=MONGO_MIN_POOL_SIZE,
+                serverSelectionTimeoutMS=MONGO_TIMEOUT_MS
+            )
+        return self._client
+
+    @property
+    def db(self):
+        """데이터베이스 반환"""
+        return self.client[self._db_name]
+
+    @property
+    def collection(self):
+        """컬렉션 반환"""
+        return self.db[self._coll_name]
+
+    def ensure_indexes(self) -> None:
+        """인덱스 생성 확인"""
+        coll = self.collection
+        coll.create_index([("published_at", DESCENDING)])
+        coll.create_index([("collected_at", DESCENDING)])
+        log.info("MongoDB 인덱스 확인 완료", collection=self._coll_name)
+
+    def close(self) -> None:
+        """연결 종료"""
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+            log.info("MongoDB 연결 종료", db=self._db_name)
+
+# 싱글톤 인스턴스
+mongo_manager = MongoClientManager()
+
+# 하위 호환성을 위한 래퍼 함수/상수
+MONGO_URI = settings.mongo_uri
+DB_NAME = settings.mongo_db_name
+COLL_NAME = settings.mongo_coll_name
 
 def _get_mongo_client():
-    global _mongo_client
-    if _mongo_client is None:
-        _mongo_client = MongoClient(
-            MONGO_URI,
-            maxPoolSize=50,  # 최대 연결 수
-            minPoolSize=10,  # 최소 연결 수
-            serverSelectionTimeoutMS=3000
-        )
-    return _mongo_client
+    """MongoDB 클라이언트 반환 (하위 호환성)"""
+    return mongo_manager.client
 
 def _get_db():
-    return _get_mongo_client()[DB_NAME]
+    """데이터베이스 반환 (하위 호환성)"""
+    return mongo_manager.db
 
 def _ensure_indexes():
-    # 최신 정렬용 인덱스 구성
-    coll = _get_db()[COLL_NAME]
-    coll.create_index([("published_at", DESCENDING)])
-    coll.create_index([("collected_at", DESCENDING)])
-    log.info("MongoDB 인덱스 확인 완료")
+    """인덱스 생성 (하위 호환성)"""
+    mongo_manager.ensure_indexes()
 
 # ===== MongoDB 조회 유틸 =====
 # 최신 N건 뉴스 집계/날짜 KST 포맷팅
@@ -951,8 +1372,8 @@ def format_topn_md(rows):
     return "\n".join(out)
 
 # ===== FRED =====
-# API 키/엔드포인트 상수
-FRED_KEY = os.getenv("FRED_API_KEY", "")
+# API 키/엔드포인트 상수 (Pydantic Settings에서 로드)
+FRED_KEY = settings.fred_api_key
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
 # ===== FRED 조회 유틸 =====
@@ -962,9 +1383,9 @@ async def _fred_observations_async(series_id: str) -> list:
         "series_id": series_id,
         "api_key": FRED_KEY,
         "file_type": "json",
-        "observation_start": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        "observation_start": (datetime.now() - timedelta(days=FRED_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     }
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=FRED_TIMEOUT_SECONDS) as client:
         r = await client.get(FRED_BASE, params=params)
         r.raise_for_status()
         obs = r.json().get("observations", []) or []
@@ -979,17 +1400,17 @@ def get_us_fed_funds_latest(use_target_range: bool = False) -> dict:
                 "series_id": "DFEDTARU",
                 "api_key": FRED_KEY,
                 "file_type": "json",
-                "observation_start": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                "observation_start": (datetime.now() - timedelta(days=FRED_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
             }
             lo_params = {
                 "series_id": "DFEDTARL",
                 "api_key": FRED_KEY,
                 "file_type": "json",
-                "observation_start": (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                "observation_start": (datetime.now() - timedelta(days=FRED_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
             }
-            
-            up_r = requests.get(FRED_BASE, params=up_params, timeout=20)
-            lo_r = requests.get(FRED_BASE, params=lo_params, timeout=20)
+
+            up_r = requests.get(FRED_BASE, params=up_params, timeout=FRED_TIMEOUT_SECONDS)
+            lo_r = requests.get(FRED_BASE, params=lo_params, timeout=FRED_TIMEOUT_SECONDS)
             
             up_r.raise_for_status()
             lo_r.raise_for_status()
@@ -1019,9 +1440,9 @@ def get_us_fed_funds_latest(use_target_range: bool = False) -> dict:
                 "series_id": "FEDFUNDS",
                 "api_key": FRED_KEY,
                 "file_type": "json",
-                "observation_start": "2024-01-01"
+                "observation_start": (datetime.now() - timedelta(days=ECOS_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
             }
-            r = requests.get(FRED_BASE, params=params, timeout=20)
+            r = requests.get(FRED_BASE, params=params, timeout=FRED_TIMEOUT_SECONDS)
             r.raise_for_status()
             
             obs = [o for o in r.json().get("observations", []) if o.get("value") not in ("", ".")]
@@ -1042,27 +1463,50 @@ def get_us_fed_funds_latest(use_target_range: bool = False) -> dict:
         return {"error": f"FRED 조회 실패: {e}", "source": "FRED"}
 
 # ===== ECOS =====
-# BOK ECOS 엔드포인트/키 상수
-ECOS_API_KEY = os.getenv("ECOS_API_KEY", "")
+# BOK ECOS 엔드포인트/키 상수 (Pydantic Settings에서 로드)
+ECOS_API_KEY = settings.ecos_api_key
 ECOS_BASE = "https://ecos.bok.or.kr/api"
 
-# ===== ECOS 조회 유틸 =====
-# 100대 지표 목록, 코드별 월별 시계열 조회
-def fetch_all_key_statistics() -> dict:
-    try:
-        url = f"{ECOS_BASE}/KeyStatisticList/{ECOS_API_KEY}/json/kr/1/200/"
-        r = requests.get(url, timeout=30)
-        if r.status_code != 200:
-            return {"error": f"API {r.status_code}"}
-        rows = (r.json().get("KeyStatisticList") or {}).get("row", [])
-        if not rows:
-            return {"error": "데이터 없음"}
-        return {"ok": True, "indicators": rows}
-    except Exception as e:
-        log.exception("ECOS 100대 지표 조회 오류")
-        return {"error": str(e)}
+# ===== 공통 에러 메시지 상수 =====
+ERR_NO_DATA = "데이터 없음"
+ERR_API_TIMEOUT = "API 응답 지연"
 
-def fetch_ecos_stat_by_code(stat_code: str, start_ym: str = None, end_ym: str = None) -> dict:
+# ===== HTTP 클라이언트 매니저 =====
+class HttpClientManager:
+    """비동기 HTTP 클라이언트 관리자 (싱글톤 패턴)
+
+    - Lazy initialization으로 필요 시에만 클라이언트 생성
+    - 앱 종료 시 명시적 close 호출 필요
+    """
+
+    def __init__(self, timeout: int = 30):
+        self._client: Optional[httpx.AsyncClient] = None
+        self._timeout = timeout
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """httpx 비동기 클라이언트 반환 (Lazy initialization)"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def close(self) -> None:
+        """클라이언트 종료"""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+            log.info("httpx 클라이언트 종료", timeout=self._timeout)
+
+# 싱글톤 인스턴스
+http_manager = HttpClientManager(timeout=HTTP_TIMEOUT_SECONDS)
+
+# 하위 호환성을 위한 래퍼 함수
+def _get_httpx_client() -> httpx.AsyncClient:
+    """httpx 비동기 클라이언트 반환 (하위 호환성)"""
+    return http_manager.client
+
+async def fetch_ecos_stat_by_code_async(stat_code: str, start_ym: str = None, end_ym: str = None) -> dict:
+    """ECOS API 비동기 조회"""
     try:
         if not end_ym:
             end_ym = datetime.now(KST).strftime("%Y%m")
@@ -1070,15 +1514,58 @@ def fetch_ecos_stat_by_code(stat_code: str, start_ym: str = None, end_ym: str = 
             start_dt = datetime.now(KST) - timedelta(days=365)
             start_ym = start_dt.strftime("%Y%m")
         url = f"{ECOS_BASE}/StatisticSearch/{ECOS_API_KEY}/json/kr/1/100/{stat_code}/M/{start_ym}/{end_ym}/"
-        r = requests.get(url, timeout=30)
+
+        client = _get_httpx_client()
+        r = await client.get(url)
         if r.status_code != 200:
             return {"error": f"API {r.status_code}"}
         rows = (r.json().get("StatisticSearch") or {}).get("row", [])
         if not rows:
-            return {"error": "데이터 없음"}
+            return {"error": ERR_NO_DATA}
         return {"ok": True, "data": rows}
+    except httpx.TimeoutException:
+        log.error("ECOS 타임아웃", stat_code=stat_code)
+        return {"error": f"ECOS {ERR_API_TIMEOUT}"}
     except Exception as e:
-        log.exception("ECOS 코드 조회 오류")
+        log.exception("ECOS 코드 조회 오류", stat_code=stat_code)
+        return {"error": str(e)}
+
+def fetch_ecos_stat_by_code(stat_code: str, start_ym: str = None, end_ym: str = None) -> dict:
+    """ECOS API 동기 조회 (ThreadPool에서 호출됨)"""
+    try:
+        if not end_ym:
+            end_ym = datetime.now(KST).strftime("%Y%m")
+        if not start_ym:
+            start_dt = datetime.now(KST) - timedelta(days=365)
+            start_ym = start_dt.strftime("%Y%m")
+        url = f"{ECOS_BASE}/StatisticSearch/{ECOS_API_KEY}/json/kr/1/100/{stat_code}/M/{start_ym}/{end_ym}/"
+        r = requests.get(url, timeout=ECOS_TIMEOUT_SECONDS)
+        if r.status_code != 200:
+            return {"error": f"API {r.status_code}"}
+        rows = (r.json().get("StatisticSearch") or {}).get("row", [])
+        if not rows:
+            return {"error": ERR_NO_DATA}
+        return {"ok": True, "data": rows}
+    except requests.Timeout:
+        log.error("ECOS 타임아웃", stat_code=stat_code)
+        return {"error": f"ECOS {ERR_API_TIMEOUT}"}
+    except Exception as e:
+        log.exception("ECOS 코드 조회 오류", stat_code=stat_code)
+        return {"error": str(e)}
+
+def fetch_all_key_statistics() -> dict:
+    """100대 지표 목록 조회"""
+    try:
+        url = f"{ECOS_BASE}/KeyStatisticList/{ECOS_API_KEY}/json/kr/1/200/"
+        r = requests.get(url, timeout=ECOS_TIMEOUT_SECONDS)
+        if r.status_code != 200:
+            return {"error": f"API {r.status_code}"}
+        rows = (r.json().get("KeyStatisticList") or {}).get("row", [])
+        if not rows:
+            return {"error": ERR_NO_DATA}
+        return {"ok": True, "indicators": rows}
+    except Exception as e:
+        log.exception("ECOS 100대 지표 조회 오류", error=str(e))
         return {"error": str(e)}
 
 # CPI/PPI/GDP/무역/경상/기준금리 포맷
@@ -1265,7 +1752,7 @@ def fetch_quote_krx(ticker: str) -> Dict[str, Any]:
         )
         
         if df.empty:
-            return {"ticker": ticker, "price": None, "error": "데이터 없음"}
+            return {"ticker": ticker, "price": None, "error": ERR_NO_DATA}
         
         # 최신 데이터
         latest = df.iloc[-1]
@@ -1292,9 +1779,8 @@ def fetch_quote_krx(ticker: str) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        log.error(f"PyKRX 조회 실패 ({ticker}): {e}")
+        log.error("PyKRX 조회 실패", ticker=ticker, error=str(e))
         return {"ticker": ticker, "price": None, "error": str(e)}
-
 
 # ===== 비동기 시세 조회 함수 =====
 async def fetch_quote_yf_async(ticker: str) -> Dict[str, Any]:
@@ -1303,13 +1789,11 @@ async def fetch_quote_yf_async(ticker: str) -> Dict[str, Any]:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(EXECUTOR, fetch_quote_yf, ticker)
 
-
 async def fetch_quote_krx_async(ticker: str) -> Dict[str, Any]:
     """PyKRX 비동기 래핑 (세마포어 + ThreadPool)"""
     async with KRX_SEMAPHORE:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(EXECUTOR, fetch_quote_krx, ticker)
-
 
 async def fetch_quote_cached_async(ticker: str) -> Dict[str, Any]:
     """TTL 캐시 기반 시세 조회 (비동기)"""
@@ -1320,7 +1804,7 @@ async def fetch_quote_cached_async(ticker: str) -> Dict[str, Any]:
         if ticker in QUOTE_CACHE:
             cached = QUOTE_CACHE[ticker]
             if cached["expires_at"] > now:
-                log.debug(f"캐시 히트: {ticker}")
+                log.debug("캐시 히트", ticker=ticker)
                 return cached["data"]
 
     # 캐시 미스 → API 호출
@@ -1344,7 +1828,6 @@ async def fetch_quote_cached_async(ticker: str) -> Dict[str, Any]:
 
     return data
 
-
 async def fetch_quotes_parallel(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     """여러 티커 병렬 조회"""
     tasks = [fetch_quote_cached_async(t) for t in tickers]
@@ -1357,7 +1840,6 @@ async def fetch_quotes_parallel(tickers: List[str]) -> Dict[str, Dict[str, Any]]
         else:
             output[ticker] = result
     return output
-
 
 # ===== 백그라운드 캐시 갱신 =====
 async def refresh_cache_background():
@@ -1375,12 +1857,11 @@ async def refresh_cache_background():
     while True:
         try:
             await fetch_quotes_parallel(key_tickers)
-            log.debug(f"백그라운드 캐시 갱신 완료: {len(key_tickers)}개 티커")
+            log.debug("백그라운드 캐시 갱신 완료", ticker_count=len(key_tickers))
         except Exception as e:
-            log.warning(f"백그라운드 캐시 갱신 실패: {e}")
+            log.warning("백그라운드 캐시 갱신 실패", error=str(e))
 
-        await asyncio.sleep(30)  # 30초 대기
-
+        await asyncio.sleep(CACHE_REFRESH_INTERVAL)
 
 def get_market_indices() -> str:
     """주요 지수 동기 조회"""
@@ -1414,42 +1895,48 @@ def get_fx_rates() -> str:
             results.append(f"• **{name}**: 데이터 없음")
     return "**주요 환율 (실시간)**\n" + "\n".join(results)
 
+# ===== 통합 시세 포맷 함수 (중복 제거) =====
+def _format_single_quote(name: str, ticker: str, quote_type: str = "index", unit: str = "", multiply: int = 1) -> str:
+    """
+    통합 시세 포맷팅 함수 (타입 안전)
+    - quote_type: "index" (지수), "fx" (환율)
+    - unit: 단위 (원, 달러 등)
+    - multiply: 표시 배율 (엔/원은 100배)
+    """
+    q = fetch_quote_yf_with_cache(ticker)
+    price = q.get("price")
+
+    if price is None:
+        return f"**{name}**\n• 현재 데이터를 가져올 수 없습니다."
+
+    # 배율 적용 (Optional 안전 처리)
+    ch = _get_safe_float(q, "change")
+    pct = _get_safe_float(q, "changePct")
+    display_price = price * multiply if multiply > 1 else price
+    display_ch = ch * multiply
+    sign = "+" if display_ch >= 0 else ""
+
+    if quote_type == "index":
+        return f"**{name} (실시간)**\n• 현재가: {display_price:,.2f}\n• 변동: {sign}{display_ch:.2f} ({sign}{pct:.2f}%)"
+    else:  # fx
+        return f"**{name} (실시간)**\n• 현재: {display_price:,.2f}{unit}\n• 변동: {sign}{display_ch:.2f}{unit} ({sign}{pct:.2f}%)"
+
 def get_kospi_index() -> str:
-    # 코스피 단건 포맷
-    q = fetch_quote_yf(TICKER_KOSPI); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
-    if price is None: return "**코스피 지수**\n• 현재 데이터를 가져올 수 없습니다."
-    sign = "+" if (ch or 0) >= 0 else ""
-    return f"**코스피 지수 (실시간)**\n• 현재가: {price:,.2f}\n• 변동: {sign}{ch if ch is not None else 'N/A'} ({sign}{pct if pct is not None else 'N/A'}%)"
+    return _format_single_quote("코스피 지수", TICKER_KOSPI, "index")
 
 def get_kosdaq_index() -> str:
-    # 코스닥 단건 포맷
-    q = fetch_quote_yf(TICKER_KOSDAQ); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
-    if price is None: return "**코스닥 지수**\n• 현재 데이터를 가져올 수 없습니다."
-    sign = "+" if (ch or 0) >= 0 else ""
-    return f"**코스닥 지수 (실시간)**\n• 현재가: {price:,.2f}\n• 변동: {sign}{ch if ch is not None else 'N/A'} ({sign}{pct if pct is not None else 'N/A'}%)"
+    return _format_single_quote("코스닥 지수", TICKER_KOSDAQ, "index")
 
 def get_usd_krw() -> str:
-    # 달러/원 포맷
-    q = fetch_quote_yf(TICKER_USD_KRW); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
-    if price is None: return "**원/달러 환율**\n• 현재 데이터를 가져올 수 없습니다."
-    sign = "+" if (ch or 0) >= 0 else ""
-    return f"**원/달러 환율 (실시간)**\n• 현재: {price:,.2f}원\n• 변동: {sign}{(ch or 0):.2f}원 ({sign}{(pct or 0):.2f}%)"
+    return _format_single_quote("원/달러 환율", TICKER_USD_KRW, "fx", "원")
 
 def get_jpy_krw() -> str:
-    # 엔/원 포맷
-    q = fetch_quote_yf(TICKER_JPY_KRW); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
-    if price is None: return "**원/엔 환율**\n• 현재 데이터를 가져올 수 없습니다."
-    sign = "+" if (ch or 0) >= 0 else ""
-    return f"**원/엔 환율 (실시간)**\n• 현재: {price:,.2f}원\n• 변동: {sign}{(ch or 0):.2f}원 ({sign}{(pct or 0):.2f}%)"
+    return _format_single_quote("원/엔 환율", TICKER_JPY_KRW, "fx", "원", multiply=JPY_MULTIPLY)
 
 def get_eur_usd() -> str:
-    # 유로/달러 포맷
-    q = fetch_quote_yf(TICKER_EUR_USD); price, ch, pct = q.get("price"), q.get("change"), q.get("changePct")
-    if price is None: return "**유로/달러 환율**\n• 현재 데이터를 가져올 수 없습니다."
-    sign = "+" if (ch or 0) >= 0 else ""
-    return f"**유로/달러 환율 (실시간)**\n• 현재: {price:,.2f}달러\n• 변동: {sign}{(ch or 0):.2f} ({sign}{(pct or 0):.2f}%)"
+    return _format_single_quote("유로/달러 환율", TICKER_EUR_USD, "fx", "달러")
 
-@lru_cache(maxsize=1000)
+@lru_cache(maxsize=LRU_CACHE_SIZE)
 def _cached_fetch_quote_yf(ticker: str, cache_key: str) -> Dict[str, Any]:
     return fetch_quote_yf(ticker)
 
@@ -1458,34 +1945,17 @@ def fetch_quote_yf_with_cache(ticker: str) -> Dict[str, Any]:
     cache_key = datetime.now().strftime("%Y%m%d%H%M")[:-1]  # 마지막 자리 제거
     return _cached_fetch_quote_yf(ticker, cache_key)
 
-# ===== 세션 메모리 =====
-# 간단한 인메모리 대화 히스토리 (최근 20턴)
-SESSIONS: Dict[str, List[Dict[str, str]]] = {}
-MAX_TURNS = 20
-
-def get_session(session_id: str) -> List[Dict[str, str]]:
-    # 세션 조회/초기화
-    if session_id not in SESSIONS: SESSIONS[session_id] = []
-    return SESSIONS[session_id]
-
-def add_turn(session_id: str, role: str, content: str):
-    # 세션 저장 및 길이 제한
-    sess = get_session(session_id)
-    sess.append({"role": role, "content": content})
-    if len(sess) > 2 * MAX_TURNS:
-        SESSIONS[session_id] = sess[-2*MAX_TURNS:]
-
 # ===== 뉴스 크롤러 스케줄러 =====
 # 네이버 크롤러 주기 실행 (10분) 테스트 후, 1시간 간격
 scheduler = BackgroundScheduler(timezone=KST)
 
 def _job_naver():
     try:
-        log.info("네이버 뉴스 크롤링 시작...")
-        crawl_today(limit_per_run=10)
+        log.info("네이버 뉴스 크롤링 시작", limit=CRAWLER_LIMIT_PER_RUN)
+        crawl_today(limit_per_run=CRAWLER_LIMIT_PER_RUN)
         log.info("네이버 뉴스 크롤링 완료")
     except Exception as e:
-        log.exception(f"크롤링 실패: {e}")
+        log.exception("크롤링 실패", error=str(e))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1493,9 +1963,9 @@ async def lifespan(app: FastAPI):
     # MongoDB 인덱스 생성
     try:
         _ensure_indexes()
-        log.info("MongoDB 인덱스 생성 완료")
+        log.info("MongoDB 인덱스 생성 완료", db=settings.mongo_db_name)
     except Exception:
-        log.exception("인덱스 생성 실패")
+        log.exception("인덱스 생성 실패", db=settings.mongo_db_name)
 
     # 즉시 첫 크롤링 실행
     _job_naver()
@@ -1505,20 +1975,20 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             _job_naver,
             "interval",
-            minutes=10,  # 1시간마다 실행
+            minutes=CRAWLER_INTERVAL_MINUTES,
             id="naver_hourly",
             max_instances=1,
             coalesce=True,
-            misfire_grace_time=60,
+            misfire_grace_time=MISFIRE_GRACE_TIME,
         )
         scheduler.start()
-        log.info("APScheduler started.")
+        log.info("APScheduler 시작됨", interval_minutes=CRAWLER_INTERVAL_MINUTES)
     except Exception:
         log.exception("APScheduler 시작 실패")
 
     # 백그라운드 캐시 갱신 태스크 시작
     cache_task = asyncio.create_task(refresh_cache_background())
-    log.info("백그라운드 캐시 갱신 태스크 시작")
+    log.info("백그라운드 캐시 갱신 태스크 시작", refresh_interval=CACHE_REFRESH_INTERVAL)
 
     yield
 
@@ -1531,48 +2001,115 @@ async def lifespan(app: FastAPI):
 
     try:
         scheduler.shutdown()
-        log.info("APScheduler stopped.")
+        log.info("APScheduler 종료됨")
     except Exception:
         log.exception("APScheduler 종료 실패")
 
+    # httpx 클라이언트 종료 (HttpClientManager 사용)
+    await http_manager.close()
+    log.info("httpx 클라이언트 종료")
+
+    # MongoDB 클라이언트 종료 (MongoClientManager 사용)
+    mongo_manager.close()
+    log.info("MongoDB 클라이언트 종료")
+
     # ThreadPoolExecutor 종료
     EXECUTOR.shutdown(wait=False)
-    log.info("ThreadPoolExecutor 종료")
+    log.info("ThreadPoolExecutor 종료", max_workers=MAX_THREAD_WORKERS)
 
 # ===== FastAPI 앱/CORS =====
 # 앱 인스턴스 생성, 전역 CORS 허용(데모 편의)
 app = FastAPI(
     title="Chat+RAG+News+Indicators (Function Calling)",
-    lifespan=lifespan  # 이 부분 추가!
+    lifespan=lifespan
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=False, 
-    allow_methods=["*"], 
+    allow_origins=settings.cors_origins_list,  # Pydantic Settings에서 로드
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ===== 로깅 컨텍스트 미들웨어 =====
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+import time
+
+class LoggingContextMiddleware(BaseHTTPMiddleware):
+    """요청별 로깅 컨텍스트 설정 미들웨어"""
+
+    async def dispatch(self, request: Request, call_next):
+        # 고유 request_id 생성
+        req_id = str(uuid.uuid4())[:8]
+        request_id_var.set(req_id)
+
+        # 요청 시작 로깅
+        start_time = time.perf_counter()
+        log.info(
+            "요청 시작",
+            method=request.method,
+            path=request.url.path,
+            client=request.client.host if request.client else "-"
+        )
+
+        try:
+            response = await call_next(request)
+
+            # 요청 완료 로깅
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log.info(
+                "요청 완료",
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                duration_ms=round(duration_ms, 2)
+            )
+            return response
+
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            log.exception(
+                "요청 실패",
+                method=request.method,
+                path=request.url.path,
+                duration_ms=round(duration_ms, 2),
+                error=str(e)
+            )
+            raise
+
+# 미들웨어 추가
+app.add_middleware(LoggingContextMiddleware)
+
 # ===== 메인 챗 엔드포인트 =====
 # 사용자 메시지 → Ollama → (필요시) 함수 호출 → 최종 답변
-@app.post("/api/chat")
-@app.post("/chat")
-async def chat(payload: dict = Body(...)):
-    user_msg = (payload.get("message") or "").strip()
-    session_id = payload.get("session_id", "default")
+@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse)
+async def chat(payload: ChatRequest):
+    user_msg = payload.message.strip()
+    session_id = payload.session_id
+
+    # 세션 ID를 로깅 컨텍스트에 설정
+    session_id_var.set(session_id)
+
     if not user_msg:
-        return {"answer": "질문이 비어있습니다."}
+        log.warning("빈 메시지 요청")
+        return ChatResponse(answer="질문이 비어있습니다.", session_id=session_id)
+
+    log.info("채팅 요청", message_length=len(user_msg))
 
     # "뉴스 최신/Top N" 빠른 경로 처리
     m = re.search(r"top\s*(\d{1,2})", user_msg, flags=re.IGNORECASE)
     if "뉴스" in user_msg and ("최신" in user_msg or m):
         try:
-            n = max(1, min(50, int(m.group(1)))) if m else 5
+            n = max(MIN_NEWS_COUNT, min(MAX_NEWS_COUNT, int(m.group(1)))) if m else DEFAULT_NEWS_COUNT
             rows = fetch_latest_topn_from_mongo(n)
-            return {"answer": format_topn_md(rows)}
+            log.info("뉴스 빠른 경로 처리", news_count=n)
+            return ChatResponse(answer=format_topn_md(rows), session_id=session_id)
         except Exception:
-            return {"answer": "DB 조회 오류. 잠시 후 다시 시도해 주세요."}
+            log.exception("뉴스 조회 실패")
+            return ChatResponse(answer="DB 조회 오류. 잠시 후 다시 시도해 주세요.", session_id=session_id)
 
     # 세션 히스토리 구성 및 LangChain 메시지 구조화
     msgs = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
@@ -1583,10 +2120,11 @@ async def chat(payload: dict = Body(...)):
     try:
         # 비동기 버전 사용 (캐시 + 세마포어 적용)
         agent_answer = await chat_with_agent_async(user_msg, session_id)
-        return {"answer": agent_answer, "session_id": session_id}
+        log.info("채팅 응답 완료", answer_length=len(agent_answer))
+        return ChatResponse(answer=agent_answer, session_id=session_id)
     except Exception:
-        log.exception("chat failed")
-        return {"answer": "일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요."}
+        log.exception("채팅 처리 실패", user_message=user_msg[:100])
+        return ChatResponse(answer="일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.", session_id=session_id, error="internal_error")
 
 # ===== 스트리밍 챗 엔드포인트 (SSE) =====
 from typing import AsyncGenerator
@@ -1595,9 +2133,8 @@ def _sse_event(chunk: str, done: bool = False) -> str:
     """SSE 이벤트 포맷 생성"""
     return f"data: {json.dumps({'chunk': chunk, 'done': done}, ensure_ascii=False)}\n\n"
 
-
 async def stream_chat_response(user_message: str, session_id: str) -> AsyncGenerator[str, None]:
-    """LLM 응답을 스트리밍으로 생성"""
+    """LLM 응답을 스트리밍으로 생성 (세마포어 + 타임아웃 + 할루시네이션 방지 적용)"""
 
     # 1. 인사 감지 시 즉시 반환
     if any(kw in user_message.lower() for kw in GREETING_KEYWORDS):
@@ -1605,6 +2142,8 @@ async def stream_chat_response(user_message: str, session_id: str) -> AsyncGener
         add_turn(session_id, "assistant", GREETING_RESPONSE)
         yield _sse_event(GREETING_RESPONSE, done=True)
         return
+
+    valid_numbers = None  # 도구 결과의 유효 숫자 (검증용)
 
     try:
         # 2. 규칙 기반 라우팅으로 도구 선택
@@ -1614,7 +2153,7 @@ async def stream_chat_response(user_message: str, session_id: str) -> AsyncGener
             # 도구 실행 (비동기)
             tool_name = route_result['tool']
             params = route_result['params']
-            log.info(f"[스트리밍] 도구 호출: {tool_name}({params})")
+            log.info("스트리밍 도구 호출", tool=tool_name, params=params)
 
             tool_result = await _execute_tool_async(tool_name, params)
 
@@ -1626,28 +2165,51 @@ async def stream_chat_response(user_message: str, session_id: str) -> AsyncGener
                 yield _sse_event(error_msg, done=True)
                 return
 
-            # 3. 도구 결과를 Gemma 2로 자연어 변환 (스트리밍)
-            tool_output = tool_result.get("output", str(tool_result))
+            # 3. 도구 결과 검증 및 정제
+            validated_result = _validate_tool_result(tool_result)
+            if "error" in validated_result:
+                error_msg = f"죄송합니다. {validated_result['error']}"
+                add_turn(session_id, "user", user_message)
+                add_turn(session_id, "assistant", error_msg)
+                yield _sse_event(error_msg, done=True)
+                return
+
+            tool_output = validated_result.get("output", "")
+            valid_numbers = validated_result.get("_valid_numbers", set())
             prompt = _build_tool_prompt(user_message, tool_output)
         else:
             # 4. 일반 대화 (도구 없이 Gemma 2만 사용)
             history = get_session(session_id)
             prompt = _build_chat_prompt(history, user_message)
 
-        # 스트리밍 응답 생성
+        # 5. 스트리밍 응답 생성 (세마포어 + 타임아웃 적용)
         full_response = ""
-        async for chunk in llm_stream.astream(prompt):
-            if hasattr(chunk, "content") and chunk.content:
-                full_response += chunk.content
-                yield _sse_event(chunk.content, done=False)
+        async with OLLAMA_SEMAPHORE:
+            try:
+                async with asyncio.timeout(LLM_TIMEOUT_SECONDS):
+                    async for chunk in llm_stream.astream(prompt):
+                        if hasattr(chunk, "content") and chunk.content:
+                            full_response += chunk.content
+                            yield _sse_event(chunk.content, done=False)
+            except asyncio.TimeoutError:
+                log.warning("스트리밍 LLM 타임아웃", timeout_seconds=LLM_TIMEOUT_SECONDS)
+                yield _sse_event(f"\n\n[응답 생성 시간 초과 ({LLM_TIMEOUT_SECONDS}초)]", done=True)
+                return
 
-        # 세션 저장
+        # 6. 응답 후처리 필터 (스트리밍 완료 후 검증)
+        filtered_response = _filter_response(full_response, valid_numbers)
+
+        # 필터링으로 변경된 경우 경고 로그
+        if filtered_response != full_response:
+            log.info("스트리밍 응답 필터링 적용됨", original_len=len(full_response), filtered_len=len(filtered_response))
+
+        # 7. 세션 저장 (필터링된 버전)
         add_turn(session_id, "user", user_message)
-        add_turn(session_id, "assistant", full_response)
+        add_turn(session_id, "assistant", filtered_response)
         yield _sse_event("", done=True)
 
     except Exception as e:
-        log.exception("[스트리밍] 채팅 처리 실패")
+        log.exception("스트리밍 채팅 처리 실패", user_message=user_message[:100])
         yield _sse_event(f"죄송합니다. 오류가 발생했습니다: {str(e)}", done=True)
 
 @app.post("/api/chat/stream")
@@ -1686,8 +2248,8 @@ def api_markets(indices: int = 0, fx: int = 0):
 # =========================
 
 # ===== FFmpeg =====
-# 입력 오디오 → mono/16k wav 변환
-FFMPEG = os.getenv("FFMPEG_BIN") or shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+# 입력 오디오 → mono/16k wav 변환 (Pydantic Settings에서 로드)
+FFMPEG = settings.ffmpeg_bin
 
 def _ffmpeg_to_wav16k(in_path: str) -> str:
     if not os.path.exists(FFMPEG):
@@ -1703,9 +2265,9 @@ def _ffmpeg_to_wav16k(in_path: str) -> str:
     return out_path
 
 # ===== CLOVA STT =====
-# API 키/엔드포인트/언어 매핑
-CLOVA_KEY_ID = os.getenv("CLOVA_KEY_ID", "")
-CLOVA_KEY = os.getenv("CLOVA_KEY", "")
+# API 키/엔드포인트/언어 매핑 (Pydantic Settings에서 로드)
+CLOVA_KEY_ID = settings.clova_key_id
+CLOVA_KEY = settings.clova_key
 CSR_URL = "https://naveropenapi.apigw.ntruss.com/recog/v1/stt"
 LANG_MAP = {"ko": "Kor", "en": "Eng", "ja": "Jpn"}
 
@@ -1737,14 +2299,14 @@ async def stt_clova(audio_file: UploadFile = File(...), lang: str = Query("Kor")
         }
         url = f"{CSR_URL}?lang={lang}"
         with open(wav_path, "rb") as f:
-            res = requests.post(url, headers=headers, data=f.read(), timeout=60)
+            res = requests.post(url, headers=headers, data=f.read(), timeout=STT_TIMEOUT_SECONDS)
         if res.status_code != 200:
             return JSONResponse(
                 {"error": f"CSR 실패: {res.status_code} {res.text}"}, status_code=500
             )
         return {"text": res.text.strip(), "lang": lang}
     except Exception as e:
-        log.exception("STT 처리 오류")
+        log.exception("STT 처리 오류", lang=lang)
         return JSONResponse({"error": str(e)}, status_code=500)
     finally:
         for p in (src_path, wav_path):
@@ -1797,8 +2359,8 @@ def tts_google_post(payload: dict = Body(...)):
     if not text:
         return JSONResponse({"error": "text is required"}, status_code=400)
 
-    # ===== GCP 인증 강화 =====
-    GCP_KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    # ===== GCP 인증 강화 (Pydantic Settings에서 로드) =====
+    GCP_KEY_PATH = settings.google_application_credentials
     if not GCP_KEY_PATH or not os.path.exists(GCP_KEY_PATH):
         return JSONResponse({"error": f"GCP 키 없음: {GCP_KEY_PATH}"}, status_code=400)
 
@@ -1814,7 +2376,7 @@ def tts_google_post(payload: dict = Body(...)):
         print("TTS 클라이언트 연결 테스트")
         
     except Exception as e:
-        log.error(f"GCP 초기화 실패: {e}")
+        log.error("GCP 초기화 실패", error=str(e))
         return JSONResponse({"error": f"GCP 초기화 실패: {str(e)}"}, status_code=500)
 
     # ===== TTS 요청 =====
@@ -1848,7 +2410,7 @@ def tts_google_post(payload: dict = Body(...)):
         return StreamingResponse(io.BytesIO(resp.audio_content), headers=headers)
         
     except Exception as e:
-        log.exception("Google TTS 실패")
+        log.exception("Google TTS 실패", lang=lang, text_length=len(text))
         return JSONResponse({"error": f"TTS 실패: {str(e)}"}, status_code=500)
 
 # =========================
@@ -1857,14 +2419,21 @@ def tts_google_post(payload: dict = Body(...)):
 
 # ===== 세션 리셋 =====
 # 인메모리 세션 전체 초기화
-@app.post("/reset")
-@app.post("/api/reset")
-async def reset():
-    SESSIONS.clear()  # 세션 딕셔너리 전부 초기화
-    return {"status": "ok", "message": "대화 기록 초기화 완료"}
+class ResetResponse(BaseModel):
+    """리셋 응답 모델"""
+    status: str = Field(default="ok")
+    message: str = Field(default="대화 기록 초기화 완료")
+
+@app.post("/reset", response_model=ResetResponse)
+@app.post("/api/reset", response_model=ResetResponse)
+async def reset(payload: Optional[ResetRequest] = None):
+    session_id = payload.session_id if payload else None
+    session_manager.clear(session_id)  # SessionManager로 세션 초기화 (Thread-Safe)
+    msg = f"세션 '{session_id}' 초기화 완료" if session_id else "전체 대화 기록 초기화 완료"
+    return ResetResponse(status="ok", message=msg)
 
 # ===== 헬스체크 =====
 # 간단 상태/서버시각(KST) 반환
-@app.get("/health")
-def health():
-    return {"status": "ok", "ts_kst": datetime.now(KST).isoformat()}
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse(status="ok", ts_kst=datetime.now(KST).isoformat())

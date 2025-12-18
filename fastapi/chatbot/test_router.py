@@ -155,18 +155,18 @@ def test_router():
         if expected_tool is None:
             # 일반 대화 케이스
             if result is None:
-                status = "✅ PASS"
+                status = "PASS"
                 passed += 1
             else:
-                status = f"❌ FAIL (expected: None, got: {result['tool']})"
+                status = f"FAIL (expected: None, got: {result['tool']})"
                 failed += 1
         else:
             # 도구 호출 케이스
             if result and result['tool'] == expected_tool and result['params'] == expected_params:
-                status = "✅ PASS"
+                status = "PASS"
                 passed += 1
             else:
-                status = f"❌ FAIL"
+                status = f"FAIL"
                 failed += 1
                 if result:
                     print(f"   Expected: {expected_tool}({expected_params})")

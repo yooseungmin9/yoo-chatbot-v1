@@ -44,7 +44,7 @@
 ```mermaid
 graph TD
     U["사용자 웹 브라우저"] --> SB["Spring Boot 8081<br>ChatController API Gateway"]
-    SB --> FA["FastAPI 8002<br>chatbot-v4.py"]
+    SB --> FA["FastAPI 8002<br>chatbot_v4.py"]
     subgraph "AI Core"
         TR["ToolRouter<br>정규식 패턴 매칭"]
         OL["Ollama Gemma 2 9B<br>응답 생성"]
@@ -196,16 +196,19 @@ chatbot-v1/
 │   └── test/                                # 테스트 코드
 ├── fastapi/                          # FastAPI 챗봇 서버
 │   └── chatbot/
-│       ├── chatbot-v0.py                   # 초기 버전
-│       ├── chatbot-v1.py                   # OpenAI GPT 버전
-│       ├── chatbot-v2.py                   # OpenAI GPT 파인튜닝 버전
-│       ├── chatbot-v3.py                   # 오픈소스 버전 (LLaMA 3.1 8B)
-│       ├── chatbot-v4.py                   # 최종 버전 (Gemma 2 9B)
+│       ├── chatbot_v0.py                   # 초기 버전
+│       ├── chatbot_v1.py                   # OpenAI GPT 버전
+│       ├── chatbot_v2.py                   # OpenAI GPT 파인튜닝 버전
+│       ├── chatbot_v3.py                   # 오픈소스 버전 (LLaMA 3.1 8B)
+│       ├── chatbot_v4.py                   # 최종 버전 (Gemma 2 9B)
+│       ├── config.py                       # 설정 및 환경변수 관리
 │       ├── crawler_rag.py                  # 네이버 뉴스 크롤러
+│       ├── test_router.py                  # ToolRouter 테스트 (레거시)
 │       ├── watcher.py                      # OpenAI Vector Store 감시
 │       ├── watcher-local.py                # 로컬 Vector Store 감시
 │       ├── .env                            # 환경변수 (gitignore)
 │       ├── requirements.txt                # Python 의존성
+│       ├── pytest.ini                      # pytest 설정
 │       ├── Dockerfile                      # Docker 이미지 설정
 │       ├── docker-compose.yml              # Docker Compose 설정
 │       ├── .dockerignore                   # Docker 빌드 제외 파일
@@ -216,6 +219,12 @@ chatbot-v1/
 │       ├── vectorstore/                    # FAISS 인덱스
 │       ├── key/                            # API 키 파일
 │       │   └── absolute-text-*.json        # Google Cloud 인증
+│       ├── tests/                          # pytest 테스트 디렉토리
+│       │   ├── __init__.py
+│       │   ├── test_tool_router.py         # ToolRouter 단위 테스트
+│       │   ├── test_config.py              # 설정 테스트
+│       │   ├── test_utils.py               # 유틸리티 테스트
+│       │   └── test_api.py                 # API 엔드포인트 테스트
 │       └── training_data.jsonl             # 훈련 데이터
 ├── build.gradle                      # Gradle 빌드 설정
 ├── settings.gradle                   # Gradle 프로젝트 설정
@@ -276,7 +285,7 @@ public class ChatController {
 
 ### 5.2 FastAPI (AI 챗봇 서버)
 
-#### [chatbot-v4.py](fastapi/chatbot/chatbot-v4.py) (~1280 lines)
+#### [chatbot_v4.py](fastapi/chatbot/chatbot_v4.py) (~1280 lines)
 
 **핵심 아키텍처 (규칙 기반 라우팅)**:
 
@@ -676,7 +685,7 @@ brew services start mongodb-community
 #### Step 6: FastAPI 서버 실행
 ```bash
 cd fastapi/chatbot
-uvicorn chatbot-v4:app --host 0.0.0.0 --port 8002 --reload
+uvicorn chatbot_v4:app --host 0.0.0.0 --port 8002 --reload
 ```
 
 #### Step 7: Spring Boot 서버 실행
@@ -1063,7 +1072,7 @@ scheduler.add_job(
     ↓
 3. [ChatController] proxyChat() → FastAPI /chat
     ↓
-4. [chatbot-v4.py]
+4. [chatbot_v4.py]
     ├─ 세션 히스토리 로드
     ├─ LangChain Agent 실행
     │   ├─ Gemma 2 9B LLM 추론
@@ -1134,7 +1143,7 @@ scheduler.add_job(
 # Terminal 1: FastAPI
 cd fastapi/chatbot
 source .venv/bin/activate
-uvicorn chatbot-v4:app --host 0.0.0.0 --port 8002
+uvicorn chatbot_v4:app --host 0.0.0.0 --port 8002
 
 # Terminal 2: Spring Boot
 ./gradlew bootRun
@@ -1174,23 +1183,31 @@ docker-compose logs -f chatbot
 
 **상세 가이드**: [AWS_DEPLOYMENT_GUIDE.md](AWS_DEPLOYMENT_GUIDE.md)
 
+**배포 환경**:
+| 항목 | 설정 |
+|------|------|
+| 인프라 | AWS EC2 Ubuntu |
+| 도메인 | 가비아 구매 → DNS 연결 |
+| 웹서버 | Nginx (리버스 프록시) |
+| SSL | Let's Encrypt (Certbot) |
+| 배포 | Git pull + 서비스 재시작 |
+
 **아키텍처**:
 ```
-Route 53 (DNS)
-  → ALB (HTTPS/SSL)
-  → EC2 (Docker + Ollama + Spring Boot)
+사용자 (www.yooseungmin.com)
+  → 가비아 DNS → EC2 Public IP
+  → Nginx (리버스 프록시 + Let's Encrypt SSL)
+  → FastAPI (8002) / Spring Boot (8081)
   → MongoDB Atlas / External APIs
 ```
 
-**비용 예상**: 월 $230-250 (t3.xlarge 기준)
-
 **주요 단계**:
 1. EC2 인스턴스 생성 (Ubuntu 22.04)
-2. Docker 설치 및 프로젝트 배포
-3. Route 53 도메인 연결
-4. ACM SSL 인증서 발급
-5. ALB 설정 (HTTPS 리스너)
-6. Target Group 생성 및 연결
+2. Docker + Nginx 설치
+3. 가비아 DNS에서 A 레코드 설정 (EC2 IP)
+4. Nginx 리버스 프록시 설정
+5. Let's Encrypt SSL 인증서 발급 (Certbot)
+6. Git pull 배포 스크립트 작성
 
 ---
 
@@ -1213,7 +1230,7 @@ Route 53 (DNS)
 
 ### 11.2 ToolRouter 구현
 
-**파일**: [chatbot-v4.py](fastapi/chatbot/chatbot-v4.py):234-318
+**파일**: [chatbot_v4.py](fastapi/chatbot/chatbot_v4.py)
 
 ```python
 class ToolRouter:
@@ -1508,12 +1525,25 @@ lsof -i :8002
 ### B. 유용한 명령어
 
 ```bash
+# ===== 배포 (EC2) =====
+~/deploy.sh                             # Git pull + 서비스 재시작
+
 # ===== Docker =====
 docker-compose up -d                    # 백그라운드 실행
 docker-compose down                     # 컨테이너 중지 및 삭제
-docker-compose logs -f chatbot          # 실시간 로그
+docker-compose logs -f                  # 실시간 로그
 docker-compose restart                  # 재시작
 docker system prune -a                  # 미사용 이미지 삭제
+
+# ===== Nginx (EC2) =====
+sudo nginx -t                           # 설정 검사
+sudo systemctl restart nginx            # 재시작
+sudo systemctl status nginx             # 상태 확인
+
+# ===== SSL (EC2) =====
+sudo certbot certificates               # 인증서 상태
+sudo certbot renew                      # 인증서 갱신
+sudo certbot renew --dry-run            # 갱신 테스트
 
 # ===== Ollama =====
 ollama list                             # 설치된 모델 목록
@@ -1530,7 +1560,8 @@ db.chatbot1_rag.count()                 # 전체 뉴스 개수
 # ===== Python =====
 source .venv/bin/activate               # 가상환경 활성화
 pip freeze > requirements.txt           # 의존성 저장
-python crawler_rag.py                   # 뉴스 크롤링 테스트
+pytest                                  # 테스트 실행
+pytest -v tests/test_tool_router.py     # 특정 테스트 실행
 
 # ===== Gradle =====
 ./gradlew build                         # 빌드
@@ -1540,7 +1571,8 @@ python crawler_rag.py                   # 뉴스 크롤링 테스트
 # ===== 시스템 모니터링 =====
 htop                                    # CPU/메모리 사용량
 df -h                                   # 디스크 사용량
-netstat -tlnp | grep 8002               # 포트 사용 확인
+docker stats                            # 컨테이너 리소스
+netstat -tlnp | grep -E '80|443|8002'   # 포트 사용 확인
 ```
 
 ---
@@ -1580,35 +1612,44 @@ netstat -tlnp | grep 8002               # 포트 사용 확인
 
 ## 버전 히스토리
 
-### v1.4 (2025-12-12) - 규칙 기반 라우팅 최적화 (chatbot-v4.py)
+### v1.5 (2025-12-18) - 테스트 및 배포 환경 개선
+- ✅ pytest 테스트 프레임워크 도입
+  - `tests/` 디렉토리 구조화
+  - `test_tool_router.py`, `test_config.py`, `test_utils.py`, `test_api.py`
+  - `pytest.ini` 설정 파일 추가
+- ✅ `config.py` 모듈 분리: 환경변수 및 설정 관리
+- ✅ AWS 배포 가이드 업데이트
+  - 가비아 도메인 + Nginx 리버스 프록시 + Let's Encrypt SSL
+  - Git pull 기반 배포 스크립트
+
+### v1.4 (2025-12-12) - 규칙 기반 라우팅 최적화 (chatbot_v4.py)
 - Gemma 2 9B 모델 적용 (Tool Calling 미지원 모델)
 - ✅ ToolRouter 클래스 구현: 정규식 패턴 매칭으로 도구 선택
 - ✅ LangChain Agent 제거: 300+ 라인 경량화
 - ✅ 성능 개선: 도구 호출 정확도 70% → 100%, 응답 속도 2~3배 향상
 - ✅ PyKRX 통합: 한국 주식 시세 조회 우선 사용
 - ✅ 테스트 추가: test_router.py (16개 케이스 100% 통과)
-- 📄 문서 업데이트: 규칙 기반 라우팅 섹션 추가 (11장)
 
-### v1.3 - 오픈소스 LLM 전환 (chatbot-v3.py)
-- 🔄 LLaMA 3.1 8B 모델 적용
-- ✅ Langchain, Tool Calling 적용
+### v1.3 - 오픈소스 LLM 전환 (chatbot_v3.py)
+- LLaMA 3.1 8B 모델 적용
+- Langchain, Tool Calling 적용
 
-### v1.2 - GPT 파인튜닝 (chatbot-v2.py)
-- 🎯 OpenAI GPT 파인튜닝 버전 -> 실패
-- ✅ GPT-4o-mini + 경제 관련 질답 300개
+### v1.2 - GPT 파인튜닝 (chatbot_v2.py)
+- OpenAI GPT 파인튜닝 시도 (실패)
+- GPT-4o-mini + 경제 관련 질답 300개
 
-### v1.1 - OpenAI GPT 기반 (chatbot-v1.py)
-- 🤖 GPT-4o-mini + Function Calling 기반 챗봇
-- ✅ 프론트 엔드 개선, TTS 친화적 개선
+### v1.1 - OpenAI GPT 기반 (chatbot_v1.py)
+- GPT-4o-mini + Function Calling 기반 챗봇
+- 프론트 엔드 개선, TTS 친화적 개선
 
-### v1.0 (2024-10-15) - 초기 릴리스 (chatbot-v0.py)
-- 🚀 GPT-5 + Function Calling 기반 챗봇
-- 🔧 MongoDB 뉴스 크롤링 자동화
-- 🎤 STT/TTS 음성 대화 지원
-- 📊 ECOS/FRED/yFinance API 통합
+### v1.0 (2024-10-15) - 초기 릴리스 (chatbot_v0.py)
+- GPT-4 + Function Calling 기반 챗봇
+- MongoDB 뉴스 크롤링 자동화
+- STT/TTS 음성 대화 지원
+- ECOS/FRED/yFinance API 통합
 
 ---
 
-**Last Updated**: 2025-12-12
-**Version**: 1.4
+**Last Updated**: 2025-12-18
+**Version**: 1.5
 **Author**: 유승민
