@@ -27,7 +27,7 @@
 ```mermaid
 graph TD
     U["사용자 웹 브라우저"] --> NG["Nginx<br>리버스 프록시 + SSL"]
-    NG --> SB["Spring Boot 8081<br>API Gateway"]
+    NG --> SB["Spring Boot 8080<br>API Gateway"]
     SB --> FA["FastAPI 8002<br>chatbot_v4.py"]
     subgraph "AI Core"
         TR["ToolRouter<br>정규식 패턴 매칭"]
@@ -89,7 +89,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 uvicorn chatbot_v4:app --port 8002      # FastAPI
 ./gradlew bootRun                        # Spring Boot (별도 터미널)
 
-# 5. 접속: http://localhost:8081/chat
+# 5. 접속: http://localhost:8080/chat
 ```
 
 ### Docker 환경
