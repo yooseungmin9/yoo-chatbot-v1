@@ -2,23 +2,19 @@
 
 ```mermaid
 graph TD
-    U["사용자 웹 브라우저"] --> SB["Spring Boot 8080<br>ChatController API Gateway"]
+    U["사용자 웹 브라우저"] --> NG["Nginx<br>리버스 프록시 + SSL"]
+    NG --> SB["Spring Boot 8081<br>API Gateway"]
     SB --> FA["FastAPI 8002<br>chatbot_v4.py"]
     subgraph "AI Core"
         TR["ToolRouter<br>정규식 패턴 매칭"]
         OL["Ollama Gemma 2 9B<br>응답 생성"]
-        RG["RAG (FAISS)<br>문서 검색/임베딩"]
-        CR["crawler_rag.py<br>뉴스 크롤러"]
-        WT["watcher.py<br>문서 감시"]
+        RG["RAG (FAISS)<br>문서 검색"]
     end
     FA --> TR
     FA --> OL
     FA --> RG
-    FA --> CR
-    FA --> WT
-    FA --> MDB["MongoDB Atlas<br>chatbot_rag, latest_news"]
-    FA --> API["External APIs<br>ECOS / FRED / yFinance / PyKRX"]
-    FA --> GC["Google Cloud<br>TTS / CLOVA STT"]
+    FA --> MDB["MongoDB Atlas"]
+    FA --> API["ECOS / FRED / PyKRX"]
 ```
 
 ### yoo-chatbot-v0
