@@ -3,7 +3,7 @@ const APP_NAME = "SUMMARIX";
 const APP_NAME_US = "SUMMARIX Economy Bot";
 const CHAT_URL = "/api/chat";
 // 스트리밍은 FastAPI 직접 호출 (Spring Boot 프록시 미지원)
-const CHAT_STREAM_URL = "/api/chat/stream";
+const CHAT_STREAM_URL = "http://localhost:8002/api/chat/stream";
 const RESET_URL = "/api/reset";
 const STT_URL = "/api/stt";
 const TTS_URL = "/api/tts";
@@ -112,7 +112,7 @@ themeToggleBtn?.addEventListener("click", toggleTheme);
 
 // ========== 2) 도우미 ==========
 const escapeHtml = (s) => String(s || "").replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m]));
-const mdSafe = (text) => escapeHtml(text).replace(/^-\s/gm, "• ").replace(/\n/g, "<br>");
+const mdSafe = (text) => escapeHtml(text).trim().replace(/\n{3,}/g, "\n\n").replace(/^-\s/gm, "• ").replace(/\n/g, "<br>").replace(/(<br>)+$/g, "");
 const scrollToBottom = () => { chatEl.scrollTop = chatEl.scrollHeight; };
 
 // 타이핑 인디케이터 표시 (말풍선 형태)
@@ -261,8 +261,9 @@ async function sendQuestionStreaming(q) {
           try {
             const data = JSON.parse(line.slice(6));
 
-            if (data.content) {
-              fullText += data.content;
+            // 서버에서 'chunk' 키로 전송
+            if (data.chunk) {
+              fullText += data.chunk;
               updateStreamingBubble(bubbleId, fullText);
             }
 

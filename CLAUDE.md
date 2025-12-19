@@ -203,7 +203,6 @@ chatbot-v1/
 │       ├── chatbot_v4.py                   # 최종 버전 (Gemma 2 9B)
 │       ├── config.py                       # 설정 및 환경변수 관리
 │       ├── crawler_rag.py                  # 네이버 뉴스 크롤러
-│       ├── test_router.py                  # ToolRouter 테스트 (레거시)
 │       ├── watcher.py                      # OpenAI Vector Store 감시
 │       ├── watcher-local.py                # 로컬 Vector Store 감시
 │       ├── .env                            # 환경변수 (gitignore)
@@ -215,7 +214,6 @@ chatbot-v1/
 │       ├── .vector_store_id                # Vector Store ID
 │       ├── .vs_state.json                  # Vector Store 상태
 │       ├── docs/                           # RAG 문서 저장소
-│       ├── vector_store/                   # 로컬 벡터 스토어
 │       ├── vectorstore/                    # FAISS 인덱스
 │       ├── key/                            # API 키 파일
 │       │   └── absolute-text-*.json        # Google Cloud 인증

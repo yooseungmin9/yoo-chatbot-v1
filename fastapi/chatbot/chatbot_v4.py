@@ -170,7 +170,7 @@ TICKER_EUR_USD = "EURUSD=X"
 # ===== 매직 넘버 상수 정의 =====
 # 동시성 제어
 MAX_API_CONCURRENT = 10          # 외부 API 최대 동시 호출 수
-MAX_YF_CONCURRENT = 5            # yfinance 최대 동시 호출 수
+MAX_YF_CONCURRENT = 2            # yfinance 최대 동시 호출 수 (rate limit 회피)
 MAX_KRX_CONCURRENT = 3           # PyKRX 최대 동시 호출 수 (rate limit 엄격)
 MAX_OLLAMA_CONCURRENT = 3        # Ollama LLM 최대 동시 호출 수 (GPU 메모리 보호)
 MAX_THREAD_WORKERS = 10          # ThreadPoolExecutor 워커 수
@@ -183,8 +183,11 @@ ECOS_TIMEOUT_SECONDS = 30        # ECOS API 타임아웃
 STT_TIMEOUT_SECONDS = 60         # STT API 타임아웃
 
 # 캐시
-QUOTE_CACHE_TTL_SECONDS = 30     # 시세 캐시 TTL (초)
-CACHE_REFRESH_INTERVAL = 30      # 백그라운드 캐시 갱신 간격 (초)
+QUOTE_CACHE_TTL_SECONDS = 60     # 시세 캐시 TTL (초)
+CACHE_REFRESH_INTERVAL = 180     # 백그라운드 캐시 갱신 간격 (초) - Yahoo rate limit 방지
+CACHE_BATCH_SIZE = 2             # 한 번에 조회할 티커 수 (rate limit 방지)
+CACHE_BATCH_DELAY = 3.0          # 배치 간 딜레이 (초)
+YF_REQUEST_DELAY = 1.0           # yfinance 개별 요청 간 딜레이 (초)
 LRU_CACHE_SIZE = 1000            # LRU 캐시 최대 크기
 
 # 세션
@@ -200,7 +203,7 @@ NEWS_ROUTER_MAX_COUNT = 20       # 라우터에서 제한하는 최대 뉴스 �
 # LLM 설정
 LLM_NUM_CTX = 8192               # Gemma 2 컨텍스트 크기
 LLM_NUM_PREDICT = 512            # 최대 생성 토큰 수
-LLM_TEMPERATURE = 0.3            # LLM 온도 (창의성)
+LLM_TEMPERATURE = 0.5           # LLM 온도 (창의성)
 OLLAMA_BASE_URL = "http://localhost:11434"
 
 # RAG 설정
@@ -416,9 +419,24 @@ SYSTEM_INSTRUCTIONS = """
 # 역할
 경제 뉴스 분석 AI 챗봇. 한국어로 물어보면 한국어만, 영어로 물어보면 영어만 사용.
 
-# 최우선 원칙: 숫자 정확성
+# 서비스 소개 (일반 대화 시 참고)
+저는 SUMMARIX 경제 뉴스 분석 챗봇입니다. 다음 기능을 제공합니다:
+- 최신 경제 뉴스 조회 및 요약
+- 한국/미국 주식 실시간 시세 조회 (삼성전자, 애플 등)
+- 코스피, 코스닥 지수 조회
+- 달러/원, 엔/원 환율 조회
+- 한국은행 기준금리, GDP 등 경제지표 조회
+- 미국 연방기금금리 조회
+
+# 일반 대화 처리
+- 경제, 투자, 금융 관련 일반 질문에 친절하게 답변합니다.
+- 경제 용어 설명, 투자 기초 개념 등을 설명할 수 있습니다.
+- 단, 투자 조언이나 특정 종목 추천은 하지 않습니다.
+- 모르는 질문에는 솔직히 "정확한 정보를 확인하기 어렵습니다"라고 답변합니다.
+
+# 숫자 정확성 원칙 (실시간 데이터 관련)
 1. 모든 가격, 지수, 환율, 퍼센트 수치는 **반드시 [DATA] 태그 안의 값만 사용**
-2. [DATA] 태그가 없으면 숫자를 절대 언급하지 않음
+2. [DATA] 태그가 없으면 구체적인 숫자를 언급하지 않음
 3. 숫자를 반올림, 변환, 추정하지 않음 - 있는 그대로만 전달
 4. "약", "대략", "정도", "추정" 같은 불확실한 표현 금지
 
@@ -427,13 +445,9 @@ SYSTEM_INSTRUCTIONS = """
 - 태그 안의 숫자를 **한 글자도 바꾸지 말고** 그대로 응답에 포함
 - 예: [DATA]price=52000[/DATA] → "52,000원" (천 단위 쉼표만 허용)
 
-## [DATA] 태그가 없을 때
-- 숫자가 필요한 질문 → "현재 조회할 수 없습니다. 잠시 후 다시 시도해 주세요."
-- 일반 대화 → 자연스럽게 응답 (단, 경제 수치 언급 금지)
-
-## 모르는 정보
-- "정확한 정보를 확인하기 어렵습니다"라고 솔직히 답변
-- 절대 추측하거나 지어내지 않음
+## [DATA] 태그가 없을 때 (일반 대화)
+- 일반 경제/금융 질문 → 친절하게 설명
+- 실시간 수치가 필요한 질문 → "현재 조회할 수 없습니다. '삼성전자 주가' 처럼 구체적으로 질문해 주세요."
 
 # 응답 형식
 - 국내 주식: "{종목명}({코드})의 현재 주가는 {price}원입니다. 전일 대비 {change}원({changePct}%) 변동했습니다."
@@ -441,12 +455,11 @@ SYSTEM_INSTRUCTIONS = """
 - 환율: "현재 {통화} 환율은 {price}원입니다."
 - 마무리: "더 궁금한 부분이 있으신가요?"
 
-# 금지 사항 (위반 시 오류)
-[DATA] 태그 밖에서 가격/지수/환율 숫자 생성
-"72,500원", "1,350원" 등 임의의 숫자 사용
-"약 5만원대", "50,000원 정도" 같은 추정 표현
-과거 데이터, 예측, 전망 언급 (지원하지 않음)
-"도구호출:", "도구결과:", "[DATA]" 텍스트를 응답에 노출
+# 금지 사항
+- [DATA] 태그 밖에서 가격/지수/환율 숫자 생성 금지
+- "72,500원", "1,350원" 등 임의의 숫자 사용 금지
+- "약 5만원대", "50,000원 정도" 같은 추정 표현 금지
+- "도구호출:", "도구결과:", "[DATA]" 텍스트를 응답에 노출 금지
 """
 
 # ===== 도구별 프롬프트 템플릿 (할루시네이션 방지 강화) =====
@@ -494,15 +507,22 @@ def get_indicator_wrapper(indicator_type: str) -> dict:
             data = get_current_account()
 
         elif t == "US_FEDFUNDS":
-            d = get_us_fed_funds_latest(False)
-            if "error" in d:
-                return {"error": "미국 실효 연방기금금리 조회 실패"}
-            data = f"미국 실효 연방기금금리(FEDFUNDS)\n• 최신값: {d['value']:.2f}{d.get('unit','%')} (기준: {d['date']})"
-        
+            # 목표범위(DFEDTARU/L)를 우선 사용 (일간 데이터로 최신)
+            d = get_us_fed_funds_latest(True)
+            if "error" not in d:
+                rng = f"{d['lower']:.2f}–{d['upper']:.2f}{d.get('unit','%')}"
+                data = f"미국 연방기금금리 목표범위\n• 현재: {rng} (기준: {d['date']})"
+            else:
+                # fallback: 실효 연방기금금리 (월간, 지연됨)
+                d = get_us_fed_funds_latest(False)
+                if "error" in d:
+                    return {"error": "미국 연방기금금리 조회 실패. FRED API에서 데이터를 가져올 수 없습니다."}
+                data = f"미국 실효 연방기금금리(FEDFUNDS)\n• 최신값: {d['value']:.2f}{d.get('unit','%')} (기준: {d['date']})\n※ 월간 데이터로 실제 현재 금리와 다를 수 있습니다."
+
         elif t == "US_FED_TARGET":
             d = get_us_fed_funds_latest(True)
             if "error" in d:
-                return {"error": "미국 연방기금금리 목표범위 조회 실패"}
+                return {"error": "미국 연방기금금리 목표범위 조회 실패. FRED API에서 데이터를 가져올 수 없습니다."}
             rng = f"{d['lower']:.2f}–{d['upper']:.2f}{d.get('unit','%')}"
             data = f"미국 연방기금금리 목표범위\n• 범위: {rng} (기준: {d['date']})"
         
@@ -641,10 +661,10 @@ class ToolRouter:
             (r'코스피|KOSPI', 'get_market', lambda q: {'market_type': 'KOSPI', 'ticker': ''}),
             (r'코스닥|KOSDAQ', 'get_market', lambda q: {'market_type': 'KOSDAQ', 'ticker': ''}),
 
-            # 환율 관련
-            (r'달러.{0,5}환율|환율.{0,5}달러|원달러', 'get_market', lambda q: {'market_type': 'USD_KRW', 'ticker': ''}),
-            (r'엔.{0,5}환율|환율.{0,5}엔', 'get_market', lambda q: {'market_type': 'JPY_KRW', 'ticker': ''}),
-            (r'유로.{0,5}달러|EURUSD', 'get_market', lambda q: {'market_type': 'EUR_USD', 'ticker': ''}),
+            # 환율 관련 (패턴 확장)
+            (r'달러.{0,5}환율|환율.{0,5}달러|원달러|달러\s*가격|원화', 'get_market', lambda q: {'market_type': 'USD_KRW', 'ticker': ''}),
+            (r'엔.{0,5}환율|환율.{0,5}엔|엔화', 'get_market', lambda q: {'market_type': 'JPY_KRW', 'ticker': ''}),
+            (r'유로.{0,5}달러|EURUSD|유로\s*환율', 'get_market', lambda q: {'market_type': 'EUR_USD', 'ticker': ''}),
 
             # 경제지표 관련
             (r'(한국|국내).{0,5}(기준금리|금리)', 'get_indicator', lambda q: {'indicator_type': 'BASE_RATE'}),
@@ -659,8 +679,8 @@ class ToolRouter:
             # "XX 얼마야?" 패턴 (종목명 + 얼마)
             (r'.{1,10}(얼마|가격|시세)', 'get_market', self._extract_stock_params_flexible),
 
-            # 서비스 도움말
-            (r'(사용법|도움말|메뉴얼|가이드|사용방법)', 'search_docs', self._extract_docs_params),
+            # 서비스 도움말 (패턴 대폭 확장)
+            (r'(사용법|도움말|메뉴얼|가이드|사용방법|기능|뭐해|뭘\s*할\s*수|무엇을|어떤\s*것|어떻게\s*사용|이\s*서비스|이\s*웹|챗봇|소개|설명해)', 'search_docs', self._extract_docs_params),
         ]
 
     def _extract_news_params(self, query: str) -> dict:
@@ -671,42 +691,50 @@ class ToolRouter:
         return {'count': count}
 
     def _extract_stock_params_flexible(self, query: str) -> dict:
-        """주식 종목명 추출 (통합 STOCK_TICKER_MAP 사용)"""
+        """주식 종목명 추출 (통합 STOCK_TICKER_MAP 사용, 복수 종목 지원)"""
         query_lower = query.lower()
+        found_tickers = []
 
-        # 1. 통합 매핑에서 확인
+        # 1. 통합 매핑에서 모든 매칭 종목 확인
         for name, ticker in STOCK_TICKER_MAP.items():
             if name.lower() in query_lower:
-                log.info("패턴 매칭: 종목명", name=name, ticker=ticker)
-                return {'market_type': 'QUOTE', 'ticker': ticker}
+                if ticker not in found_tickers:
+                    log.info("패턴 매칭: 종목명", name=name, ticker=ticker)
+                    found_tickers.append(ticker)
 
         # 2. 6자리 숫자 티커 (한국 주식)
-        match = re.search(r'(\d{6})', query)
-        if match:
+        for match in re.finditer(r'(\d{6})', query):
             ticker = f"{match.group(1)}.KS"
-            log.info("패턴 매칭: 숫자 티커", ticker=ticker)
-            return {'market_type': 'QUOTE', 'ticker': ticker}
+            if ticker not in found_tickers:
+                log.info("패턴 매칭: 숫자 티커", ticker=ticker)
+                found_tickers.append(ticker)
 
         # 3. 영문 대문자 1~5자 티커 (해외 주식)
-        match = re.search(r'\b([A-Z]{1,5})\b', query.upper())
-        if match:
+        excluded = {'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'YOU', 'ALL', 'CAN', 'HAD', 'HER', 'WAS', 'ONE', 'OUR', 'OUT'}
+        for match in re.finditer(r'\b([A-Z]{1,5})\b', query.upper()):
             ticker = match.group(1)
-            # 일반 단어 제외
-            excluded = {'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'YOU', 'ALL', 'CAN', 'HAD', 'HER', 'WAS', 'ONE', 'OUR', 'OUT'}
-            if ticker not in excluded:
+            if ticker not in excluded and ticker not in found_tickers:
                 log.info("패턴 매칭: 영문 티커", ticker=ticker)
-                return {'market_type': 'QUOTE', 'ticker': ticker}
+                found_tickers.append(ticker)
 
-        # 4. 종목 특정 불가 → 빈 티커 반환 (LLM이 사용자에게 확인 요청)
-        log.warning("종목 특정 불가", query=query)
-        return {'market_type': 'QUOTE', 'ticker': ''}
+        # 4. 결과 반환
+        if len(found_tickers) > 1:
+            # 복수 종목: MULTI_QUOTE 타입으로 반환
+            log.info("복수 종목 감지", tickers=found_tickers)
+            return {'market_type': 'MULTI_QUOTE', 'tickers': found_tickers}
+        elif len(found_tickers) == 1:
+            return {'market_type': 'QUOTE', 'ticker': found_tickers[0]}
+        else:
+            # 종목 특정 불가 → 빈 티커 반환 (LLM이 사용자에게 확인 요청)
+            log.warning("종목 특정 불가", query=query)
+            return {'market_type': 'QUOTE', 'ticker': ''}
 
     def _extract_docs_params(self, query: str) -> dict:
         """문서 검색 쿼리 추출"""
         return {'query': query}
 
     def route(self, query: str) -> Optional[Dict[str, Any]]:
-        """쿼리를 분석하여 매칭되는 도구와 파라미터 반환"""
+        """쿼리를 분석하여 매칭되는 도구와 파라미터 반환 (단일 매칭)"""
         query_lower = query.lower()
 
         for pattern, tool_name, param_extractor in self.rules:
@@ -722,6 +750,30 @@ class ToolRouter:
                     continue
 
         return None  # 매칭 안 됨 → 일반 대화
+
+    def route_multiple(self, query: str) -> List[Dict[str, Any]]:
+        """쿼리를 분석하여 매칭되는 모든 도구와 파라미터 반환 (복합 질문 지원)"""
+        query_lower = query.lower()
+        matched = []
+        matched_tools = set()  # 중복 도구 방지
+
+        for pattern, tool_name, param_extractor in self.rules:
+            if re.search(pattern, query_lower):
+                try:
+                    params = param_extractor(query)
+                    # 같은 도구라도 파라미터가 다르면 추가 (예: 여러 종목)
+                    tool_key = f"{tool_name}:{str(sorted(params.items()))}"
+                    if tool_key not in matched_tools:
+                        matched.append({
+                            'tool': tool_name,
+                            'params': params
+                        })
+                        matched_tools.add(tool_key)
+                except Exception as e:
+                    log.error("파라미터 추출 실패", pattern=pattern, error=str(e))
+                    continue
+
+        return matched
 
 # 라우터 인스턴스 생성
 router = ToolRouter()
@@ -888,14 +940,49 @@ async def _handle_quote(ticker: str) -> dict:
     data = await fetch_quote_cached_async(resolved)
     return _format_quote_output(ticker, data)
 
-async def get_market_wrapper_async(market_type: str, ticker: str = "") -> dict:
+async def _handle_multi_quote(tickers: List[str]) -> dict:
+    """복수 종목 시세 조회 (병렬)"""
+    if not tickers:
+        return {"output": "종목을 특정할 수 없습니다. 종목명이나 티커 코드를 알려주시겠어요?"}
+
+    # 티커 해석
+    resolved_tickers = [resolve_ticker(t) for t in tickers]
+
+    # 병렬 조회
+    results = await fetch_quotes_parallel(resolved_tickers)
+
+    # 결과 포맷팅
+    output_lines = ["**📊 복수 종목 시세 조회 결과**\n"]
+    for original, resolved in zip(tickers, resolved_tickers):
+        data = results.get(resolved, {})
+        if data.get("error"):
+            output_lines.append(f"• **{original}**: 조회 실패 - {data['error']}")
+        elif data.get("price") is not None:
+            price = data["price"]
+            ch = _get_safe_float(data, "change")
+            pct = _get_safe_float(data, "changePct")
+            sign = "+" if ch >= 0 else ""
+            # 원화/달러 구분
+            is_korean = resolved.endswith((".KS", ".KQ"))
+            if is_korean:
+                output_lines.append(f"• **{original}**: {price:,.0f}원 ({sign}{pct:.2f}%)")
+            else:
+                output_lines.append(f"• **{original}**: ${price:,.2f} ({sign}{pct:.2f}%)")
+        else:
+            output_lines.append(f"• **{original}**: 데이터 없음")
+
+    return {"output": "\n".join(output_lines)}
+
+async def get_market_wrapper_async(market_type: str, ticker: str = "", tickers: List[str] = None) -> dict:
     """시장 데이터 조회 래퍼 (비동기 - 캐시 활용)"""
     try:
         market_type = market_type.strip().upper()
 
-        # 특수 케이스: MARKET_SUMMARY, QUOTE
+        # 특수 케이스: MARKET_SUMMARY, QUOTE, MULTI_QUOTE
         if market_type == "MARKET_SUMMARY":
             return await _handle_market_summary()
+        if market_type == "MULTI_QUOTE":
+            return await _handle_multi_quote(tickers or [])
         if market_type == "QUOTE":
             return await _handle_quote(ticker)
 
@@ -935,15 +1022,20 @@ def create_vectorstore():
     )
     chunks = text_splitter.split_documents(documents)
     
-    # 벡터스토어 생성 및 저장
+    # 벡터스토어 생성 및 저장 (watcher-local.py와 동일 경로)
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    vectorstore.save_local("./vectorstore")
+    vectorstore.save_local("./vector_store")
     return vectorstore
+
+# 벡터스토어 경로 (watcher-local.py와 동일하게 통일)
+VECTOR_STORE_PATH = "./vector_store"
 
 # 벡터스토어 로드 (앱 시작 시)
 try:
-    vectorstore = FAISS.load_local("./vectorstore", embeddings, allow_dangerous_deserialization=True)
-except Exception:
+    vectorstore = FAISS.load_local(VECTOR_STORE_PATH, embeddings, allow_dangerous_deserialization=True)
+    log.info("벡터스토어 로드 완료", path=VECTOR_STORE_PATH)
+except Exception as e:
+    log.warning("벡터스토어 로드 실패, 새로 생성", error=str(e))
     vectorstore = create_vectorstore()
 
 # ===== 검색 함수 =====
@@ -1002,8 +1094,15 @@ async def _execute_tool_async(tool_name: str, params: dict) -> dict:
 
     if tool_name == 'get_market':
         # 비동기 시세 조회 (캐시 + 세마포어 적용)
+        # MULTI_QUOTE 지원
+        market_type = params.get('market_type', '')
+        if market_type == 'MULTI_QUOTE':
+            return await get_market_wrapper_async(
+                market_type='MULTI_QUOTE',
+                tickers=params.get('tickers', [])
+            )
         return await get_market_wrapper_async(
-            market_type=params.get('market_type', ''),
+            market_type=market_type,
             ticker=params.get('ticker', '')
         )
     elif tool_name == 'get_latest_news':
@@ -1199,40 +1298,54 @@ async def chat_with_agent_async(user_message: str, session_id: str = "default") 
         add_turn(session_id, "assistant", GREETING_RESPONSE)
         return GREETING_RESPONSE
 
-    valid_numbers = None  # 도구 결과의 유효 숫자 (검증용)
+    valid_numbers = set()  # 도구 결과의 유효 숫자 (검증용)
 
     try:
-        # 2. 규칙 기반 라우팅으로 도구 선택
-        route_result = router.route(user_message)
+        # 2. 규칙 기반 라우팅으로 도구 선택 (복합 질문 지원)
+        route_results = router.route_multiple(user_message)
 
-        if route_result:
-            # 도구 실행 (비동기)
-            tool_name = route_result['tool']
-            params = route_result['params']
-            log.info("도구 호출", tool=tool_name, params=params)
+        if route_results:
+            # 여러 도구 실행 및 결과 합치기
+            all_tool_outputs = []
 
-            tool_result = await _execute_tool_async(tool_name, params)
+            for route_result in route_results:
+                tool_name = route_result['tool']
+                params = route_result['params']
+                log.info("도구 호출", tool=tool_name, params=params)
 
-            # 에러 처리
-            if "error" in tool_result:
-                error_msg = f"죄송합니다. {tool_result['error']}"
+                tool_result = await _execute_tool_async(tool_name, params)
+
+                # 에러는 로깅만 하고 계속 진행 (일부 실패해도 다른 결과 반환)
+                if "error" in tool_result:
+                    log.warning("도구 실행 실패", tool=tool_name, error=tool_result['error'])
+                    all_tool_outputs.append(f"[{tool_name}] 조회 실패: {tool_result['error']}")
+                    continue
+
+                # 3. 도구 결과 검증 및 정제
+                validated_result = _validate_tool_result(tool_result)
+                if "error" in validated_result:
+                    log.warning("도구 결과 검증 실패", tool=tool_name, error=validated_result['error'])
+                    all_tool_outputs.append(f"[{tool_name}] 검증 실패: {validated_result['error']}")
+                    continue
+
+                tool_output = validated_result.get("output", "")
+                if tool_output:
+                    all_tool_outputs.append(f"[{tool_name}] {tool_output}")
+
+                # 유효 숫자 합치기
+                if "_valid_numbers" in validated_result:
+                    valid_numbers.update(validated_result["_valid_numbers"])
+
+            # 모든 도구가 실패한 경우
+            if not all_tool_outputs:
+                error_msg = "죄송합니다. 요청하신 정보를 조회하지 못했습니다."
                 add_turn(session_id, "user", user_message)
                 add_turn(session_id, "assistant", error_msg)
                 return error_msg
-
-            # 3. 도구 결과 검증 및 정제
-            validated_result = _validate_tool_result(tool_result)
-            if "error" in validated_result:
-                error_msg = f"죄송합니다. {validated_result['error']}"
-                add_turn(session_id, "user", user_message)
-                add_turn(session_id, "assistant", error_msg)
-                return error_msg
-
-            tool_output = validated_result.get("output", "")
-            valid_numbers = validated_result.get("_valid_numbers", set())
 
             # 4. 도구 결과를 Gemma 2로 자연어 변환 (세마포어 + 타임아웃 적용)
-            context_prompt = _build_tool_prompt(user_message, tool_output)
+            combined_output = "\n".join(all_tool_outputs)
+            context_prompt = _build_tool_prompt(user_message, combined_output)
             raw_answer = await _invoke_llm_async(context_prompt)
         else:
             # 5. 일반 대화 (도구 없이 Gemma 2만 사용, 세마포어 + 타임아웃 적용)
@@ -1615,10 +1728,20 @@ def get_current_account() -> str:
     return f"**경상수지**\n• 최신값: ${latest.get('DATA_VALUE','N/A')}백만 (기준: {latest.get('TIME','')})"
 
 def get_base_rate() -> str:
-    res = fetch_ecos_stat_by_code("901Y001")
-    if "error" in res: return f"기준금리 조회 실패: {res['error']}"
+    """한국은행 기준금리 조회 (722Y001 = 한국은행 기준금리)"""
+    # 722Y001: 한국은행 기준금리 (정확한 통계표 코드)
+    res = fetch_ecos_stat_by_code("722Y001")
+    if "error" in res:
+        # 백업: 901Y001 시도
+        res = fetch_ecos_stat_by_code("901Y001")
+        if "error" in res:
+            return f"기준금리 조회 실패: {res['error']}. 한국은행 ECOS API에서 데이터를 가져올 수 없습니다."
+    if not res.get("data"):
+        return "기준금리 데이터가 없습니다."
     latest = res["data"][-1]
-    return f"**한국은행 기준금리**\n• 현재 금리: {latest.get('DATA_VALUE','N/A')} (기준: {latest.get('TIME','')})"
+    value = latest.get('DATA_VALUE', 'N/A')
+    time_str = latest.get('TIME', '')
+    return f"**한국은행 기준금리**\n• 현재 금리: {value}% (기준: {time_str})"
 
 # ===== yfinance 유틸 =====
 # 주요 지수/원자재/금리 티커 매핑 (개별 종목은 STOCK_TICKER_MAP 사용)
@@ -1680,6 +1803,52 @@ def _normalize_ticker(t: str) -> str:
         return t.replace(".", "-")
     return t
 
+# ===== 환율 Fallback API (yfinance 실패 시 사용) =====
+def _fetch_exchange_rate_fallback(ticker: str) -> Dict[str, Any]:
+    """exchangerate-api.com을 이용한 환율 조회 (yfinance 대체용)"""
+    try:
+        # 티커에서 통화쌍 추출 (예: USDKRW=X → USD, KRW)
+        pair = ticker.replace("=X", "").upper()
+
+        # 지원하는 통화쌍 매핑
+        currency_map = {
+            "USDKRW": ("USD", "KRW"),
+            "JPYKRW": ("JPY", "KRW"),
+            "EURUSD": ("EUR", "USD"),
+            "EURKRW": ("EUR", "KRW"),
+            "GBPUSD": ("GBP", "USD"),
+        }
+
+        if pair not in currency_map:
+            return {"error": f"지원하지 않는 환율: {ticker}"}
+
+        base, target = currency_map[pair]
+
+        # exchangerate-api.com (무료, API 키 불필요)
+        url = f"https://open.er-api.com/v6/latest/{base}"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+
+        if data.get("result") != "success":
+            return {"error": "환율 API 응답 오류"}
+
+        rate = data["rates"].get(target)
+        if rate is None:
+            return {"error": f"{target} 환율 데이터 없음"}
+
+        return {
+            "ticker": ticker,
+            "price": round(float(rate), 2),
+            "prevClose": None,
+            "change": None,
+            "changePct": None,
+            "ts_kst": datetime.now(KST).isoformat(),
+            "_source": "exchangerate-api"
+        }
+    except Exception as e:
+        log.error("환율 fallback API 실패", ticker=ticker, error=str(e))
+        return {"error": f"환율 조회 실패: {str(e)}"}
+
 def fetch_quote_yf(ticker: str) -> Dict[str, Any]:
     # yfinance 히스토리 조회 → 현재가/전일비/등락률/기준시각(KST) 계산
     tkr = _normalize_ticker(ticker)
@@ -1726,6 +1895,19 @@ def fetch_quote_yf(ticker: str) -> Dict[str, Any]:
         change = price - prev_close
         change_pct = (change / prev_close) * 100.0
 
+    # 가격을 가져오지 못한 경우
+    if price is None:
+        # 환율 티커인 경우 fallback API 시도
+        if "=" in tkr:
+            log.info("yfinance 환율 실패, fallback API 시도", ticker=tkr)
+            fallback_result = _fetch_exchange_rate_fallback(tkr)
+            if "error" not in fallback_result:
+                return fallback_result
+            # fallback도 실패
+            return {"ticker": tkr, "price": None, "error": f"{tkr} 환율 데이터를 가져올 수 없습니다. 잠시 후 다시 시도해주세요."}
+        # 일반 주식
+        return {"ticker": tkr, "price": None, "error": f"{tkr} 시세를 가져올 수 없습니다. 티커가 올바른지 확인해주세요."}
+
     return {
         "ticker": tkr,
         "price": _round_or_none(price, 2),
@@ -1735,40 +1917,88 @@ def fetch_quote_yf(ticker: str) -> Dict[str, Any]:
         "ts_kst": last_ts_kst or datetime.now(KST).isoformat()
     }
     
+# 한국 지수 티커 매핑 (yFinance → PyKRX)
+KRX_INDEX_MAP = {
+    "^KS11": "1001",   # 코스피
+    "^KQ11": "2001",   # 코스닥
+}
+
+def fetch_quote_krx_index(ticker: str) -> Dict[str, Any]:
+    """PyKRX로 한국 지수 조회 (코스피, 코스닥)"""
+    try:
+        krx_code = KRX_INDEX_MAP.get(ticker)
+        if not krx_code:
+            return {"ticker": ticker, "price": None, "error": "지원하지 않는 지수"}
+
+        today = datetime.now(KST).strftime("%Y%m%d")
+        fromdate = (datetime.now(KST) - timedelta(days=7)).strftime("%Y%m%d")
+
+        # 지수 OHLCV 조회
+        df = stock.get_index_ohlcv_by_date(fromdate, today, krx_code)
+
+        if df.empty:
+            return {"ticker": ticker, "price": None, "error": ERR_NO_DATA}
+
+        latest = df.iloc[-1]
+        price = float(latest["종가"])
+
+        prev_close = None
+        change = None
+        change_pct = None
+
+        if len(df) >= 2:
+            prev = df.iloc[-2]
+            prev_close = float(prev["종가"])
+            change = price - prev_close
+            change_pct = (change / prev_close) * 100.0
+
+        return {
+            "ticker": ticker,
+            "price": round(price, 2),
+            "prevClose": round(prev_close, 2) if prev_close else None,
+            "change": round(change, 2) if change else None,
+            "changePct": round(change_pct, 2) if change_pct else None,
+            "ts_kst": datetime.now(KST).isoformat()
+        }
+
+    except Exception as e:
+        log.warning("PyKRX 지수 조회 실패", ticker=ticker, error=str(e))
+        return {"ticker": ticker, "price": None, "error": str(e)}
+
 def fetch_quote_krx(ticker: str) -> Dict[str, Any]:
     """PyKRX로 한국 주식 조회 (yfinance 대체)"""
     try:
         # 티커 정규화 (005930.KS → 005930)
         code = ticker.replace(".KS", "").replace(".KQ", "")
-        
+
         # 오늘 날짜
         today = datetime.now(KST).strftime("%Y%m%d")
-        
+
         # 최근 2일 데이터 조회 (전일 비교용)
         df = stock.get_market_ohlcv_by_date(
             fromdate=(datetime.now(KST) - timedelta(days=5)).strftime("%Y%m%d"),
             todate=today,
             ticker=code
         )
-        
+
         if df.empty:
             return {"ticker": ticker, "price": None, "error": ERR_NO_DATA}
-        
+
         # 최신 데이터
         latest = df.iloc[-1]
         price = float(latest["종가"])
-        
+
         # 전일 데이터 (있으면)
         prev_close = None
         change = None
         change_pct = None
-        
+
         if len(df) >= 2:
             prev = df.iloc[-2]
             prev_close = float(prev["종가"])
             change = price - prev_close
             change_pct = (change / prev_close) * 100.0
-        
+
         return {
             "ticker": ticker,
             "price": round(price, 0),  # 원화는 소수점 없음
@@ -1777,15 +2007,17 @@ def fetch_quote_krx(ticker: str) -> Dict[str, Any]:
             "changePct": round(change_pct, 2) if change_pct else None,
             "ts_kst": datetime.now(KST).isoformat()
         }
-        
+
     except Exception as e:
         log.error("PyKRX 조회 실패", ticker=ticker, error=str(e))
         return {"ticker": ticker, "price": None, "error": str(e)}
 
 # ===== 비동기 시세 조회 함수 =====
 async def fetch_quote_yf_async(ticker: str) -> Dict[str, Any]:
-    """yfinance 비동기 래핑 (세마포어 + ThreadPool)"""
+    """yfinance 비동기 래핑 (세마포어 + ThreadPool + 딜레이)"""
     async with YF_SEMAPHORE:
+        # rate limit 회피를 위한 요청 간 딜레이
+        await asyncio.sleep(YF_REQUEST_DELAY)
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(EXECUTOR, fetch_quote_yf, ticker)
 
@@ -1794,6 +2026,12 @@ async def fetch_quote_krx_async(ticker: str) -> Dict[str, Any]:
     async with KRX_SEMAPHORE:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(EXECUTOR, fetch_quote_krx, ticker)
+
+async def fetch_quote_krx_index_async(ticker: str) -> Dict[str, Any]:
+    """PyKRX 지수 비동기 래핑 (세마포어 + ThreadPool)"""
+    async with KRX_SEMAPHORE:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(EXECUTOR, fetch_quote_krx_index, ticker)
 
 async def fetch_quote_cached_async(ticker: str) -> Dict[str, Any]:
     """TTL 캐시 기반 시세 조회 (비동기)"""
@@ -1808,15 +2046,23 @@ async def fetch_quote_cached_async(ticker: str) -> Dict[str, Any]:
                 return cached["data"]
 
     # 캐시 미스 → API 호출
-    is_korean = ticker.endswith((".KS", ".KQ")) or (ticker.isdigit() and len(ticker) == 6)
+    is_korean_index = ticker in KRX_INDEX_MAP  # ^KS11, ^KQ11
+    is_korean_stock = ticker.endswith((".KS", ".KQ")) or (ticker.isdigit() and len(ticker) == 6)
 
-    if is_korean:
+    if is_korean_index:
+        # 한국 지수: PyKRX 우선
+        data = await fetch_quote_krx_index_async(ticker)
+        if data.get("error"):
+            # fallback to yfinance
+            data = await fetch_quote_yf_async(ticker)
+    elif is_korean_stock:
         # 한국 주식: PyKRX 우선
         data = await fetch_quote_krx_async(ticker)
         if data.get("error"):
             # fallback to yfinance
             data = await fetch_quote_yf_async(ticker)
     else:
+        # 해외 주식/지수: yfinance
         data = await fetch_quote_yf_async(ticker)
 
     # 캐시 저장
@@ -1828,8 +2074,23 @@ async def fetch_quote_cached_async(ticker: str) -> Dict[str, Any]:
 
     return data
 
+async def fetch_quotes_sequential(tickers: List[str], delay: float = 0.0) -> Dict[str, Dict[str, Any]]:
+    """여러 티커 순차 조회 (rate limit 회피)"""
+    output = {}
+    for i, ticker in enumerate(tickers):
+        try:
+            result = await fetch_quote_cached_async(ticker)
+            output[ticker] = result
+        except Exception as e:
+            output[ticker] = {"ticker": ticker, "error": str(e)}
+
+        # 마지막 티커가 아니면 딜레이
+        if delay > 0 and i < len(tickers) - 1:
+            await asyncio.sleep(delay)
+    return output
+
 async def fetch_quotes_parallel(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
-    """여러 티커 병렬 조회"""
+    """여러 티커 병렬 조회 (캐시 히트 시에만 효율적)"""
     tasks = [fetch_quote_cached_async(t) for t in tickers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1843,21 +2104,21 @@ async def fetch_quotes_parallel(tickers: List[str]) -> Dict[str, Dict[str, Any]]
 
 # ===== 백그라운드 캐시 갱신 =====
 async def refresh_cache_background():
-    """주요 시세 백그라운드 갱신 (30초마다)"""
-    # 주요 티커 목록
-    key_tickers = [
-        # 지수
-        TICKER_KOSPI, TICKER_KOSDAQ, TICKER_DOW, TICKER_SP500, TICKER_NASDAQ,
-        # 환율
-        TICKER_USD_KRW, TICKER_JPY_KRW, TICKER_EUR_USD,
-        # 한국 대형주 (상위 5개)
+    """주요 시세 백그라운드 갱신 (PyKRX 기반 한국 데이터만 - yFinance rate limit 회피)"""
+    # 한국 데이터만 캐싱 (PyKRX 사용, 안정적)
+    # 해외 데이터(yFinance)는 사용자 요청 시에만 조회
+    kr_tickers = [
+        # 한국 지수 (PyKRX)
+        TICKER_KOSPI, TICKER_KOSDAQ,
+        # 한국 대형주 (상위 5개, PyKRX)
         "005930.KS", "000660.KS", "035420.KS", "005380.KS", "035720.KS",
     ]
 
     while True:
         try:
-            await fetch_quotes_parallel(key_tickers)
-            log.debug("백그라운드 캐시 갱신 완료", ticker_count=len(key_tickers))
+            # 순차 처리: 각 티커 간 딜레이
+            await fetch_quotes_sequential(kr_tickers, delay=0.5)
+            log.debug("백그라운드 캐시 갱신 완료 (한국)", ticker_count=len(kr_tickers))
         except Exception as e:
             log.warning("백그라운드 캐시 갱신 실패", error=str(e))
 
@@ -2143,40 +2404,53 @@ async def stream_chat_response(user_message: str, session_id: str) -> AsyncGener
         yield _sse_event(GREETING_RESPONSE, done=True)
         return
 
-    valid_numbers = None  # 도구 결과의 유효 숫자 (검증용)
+    valid_numbers = set()  # 도구 결과의 유효 숫자 (검증용)
 
     try:
-        # 2. 규칙 기반 라우팅으로 도구 선택
-        route_result = router.route(user_message)
+        # 2. 규칙 기반 라우팅으로 도구 선택 (복합 질문 지원)
+        route_results = router.route_multiple(user_message)
 
-        if route_result:
-            # 도구 실행 (비동기)
-            tool_name = route_result['tool']
-            params = route_result['params']
-            log.info("스트리밍 도구 호출", tool=tool_name, params=params)
+        if route_results:
+            # 여러 도구 실행 및 결과 합치기
+            all_tool_outputs = []
 
-            tool_result = await _execute_tool_async(tool_name, params)
+            for route_result in route_results:
+                tool_name = route_result['tool']
+                params = route_result['params']
+                log.info("스트리밍 도구 호출", tool=tool_name, params=params)
 
-            # 에러 처리
-            if "error" in tool_result:
-                error_msg = f"죄송합니다. {tool_result['error']}"
+                tool_result = await _execute_tool_async(tool_name, params)
+
+                # 에러는 로깅만 하고 계속 진행
+                if "error" in tool_result:
+                    log.warning("도구 실행 실패", tool=tool_name, error=tool_result['error'])
+                    all_tool_outputs.append(f"[{tool_name}] 조회 실패: {tool_result['error']}")
+                    continue
+
+                # 3. 도구 결과 검증 및 정제
+                validated_result = _validate_tool_result(tool_result)
+                if "error" in validated_result:
+                    log.warning("도구 결과 검증 실패", tool=tool_name, error=validated_result['error'])
+                    all_tool_outputs.append(f"[{tool_name}] 검증 실패: {validated_result['error']}")
+                    continue
+
+                tool_output = validated_result.get("output", "")
+                if tool_output:
+                    all_tool_outputs.append(f"[{tool_name}] {tool_output}")
+
+                if "_valid_numbers" in validated_result:
+                    valid_numbers.update(validated_result["_valid_numbers"])
+
+            # 모든 도구가 실패한 경우
+            if not all_tool_outputs:
+                error_msg = "죄송합니다. 요청하신 정보를 조회하지 못했습니다."
                 add_turn(session_id, "user", user_message)
                 add_turn(session_id, "assistant", error_msg)
                 yield _sse_event(error_msg, done=True)
                 return
 
-            # 3. 도구 결과 검증 및 정제
-            validated_result = _validate_tool_result(tool_result)
-            if "error" in validated_result:
-                error_msg = f"죄송합니다. {validated_result['error']}"
-                add_turn(session_id, "user", user_message)
-                add_turn(session_id, "assistant", error_msg)
-                yield _sse_event(error_msg, done=True)
-                return
-
-            tool_output = validated_result.get("output", "")
-            valid_numbers = validated_result.get("_valid_numbers", set())
-            prompt = _build_tool_prompt(user_message, tool_output)
+            combined_output = "\n".join(all_tool_outputs)
+            prompt = _build_tool_prompt(user_message, combined_output)
         else:
             # 4. 일반 대화 (도구 없이 Gemma 2만 사용)
             history = get_session(session_id)

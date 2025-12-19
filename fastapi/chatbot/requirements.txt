@@ -1,10 +1,11 @@
-# FastAPI & Server
+# ===== FastAPI & Server =====
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 python-multipart==0.0.20
 httpx==0.28.1
+aiohttp==3.13.2
 
-# LangChain & AI
+# ===== LangChain & AI =====
 langchain==0.3.13
 langchain-community==0.3.13
 langchain-core==0.3.28
@@ -12,36 +13,38 @@ langchain-ollama==0.2.1
 langchain-huggingface==0.1.2
 langchain-text-splitters==0.3.4
 
-# Vector Store & Embeddings
+# ===== Vector Store & Embeddings =====
 faiss-cpu==1.9.0.post1
 sentence-transformers==3.3.1
 
-# Database
+# ===== Database =====
 pymongo==4.10.1
 
-# APIs & Data Sources
+# ===== APIs & Data Sources =====
 yfinance==0.2.50
-pykrx==1.0.53
+pykrx==1.0.51
 pandas==2.2.3
 requests==2.32.3
 
-# Google Cloud & TTS
+# ===== Google Cloud TTS =====
 google-cloud-texttospeech==2.18.0
 
-# Scheduler
+# ===== Scheduler =====
 apscheduler==3.10.4
 
-# Document Processing
+# ===== Document Processing =====
 unstructured==0.16.12
 python-docx==1.1.2
+beautifulsoup4==4.14.3
 
-# Environment
+# ===== File Watcher =====
+watchdog==6.0.0
+
+# ===== Environment & Config =====
 python-dotenv==1.0.1
-
-# Utilities
 pydantic==2.10.4
 pydantic-settings==2.7.0
 
-# Testing
+# ===== Testing =====
 pytest==8.3.4
 pytest-asyncio==0.24.0
