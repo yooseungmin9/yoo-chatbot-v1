@@ -5,7 +5,8 @@
 **개발자**: 유승민
 **개발 기간**: 2024.09.15 ~ 2024.10.15 (1개월)
 
-> **시연 영상**: https://youtu.be/Bk_dYeuUDCE?si=dGZZ6Px7Fax4qNhX&t=114  
+> **시연 영상**: https://youtu.be/Bk_dYeuUDCE?si=dGZZ6Px7Fax4qNhX&t=114
+> **개선 사항**: https://app.notion.com/p/yoo-chatbot-2bfca2ee78bc8089a2e6e8993860d803?source=copy_link
 
 ---
 
